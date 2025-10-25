@@ -79,13 +79,13 @@ graph TD
 
 ```python
 import taichi as ti
-from simulation.data import TetMeshData
-from simulation.integrators import ImplicitEulerIntegrator
-from simulation.solvers import PDSolver
-from simulation.collision import ContinuousCollision
-from simulation.renderers import GGIRenderer
-from simulation.world import SimulationWorld
-from simulation.objects import TetMeshObject
+from potentia.data import TetMeshData
+from potentia.integrators import ImplicitEulerIntegrator
+from potentia.solvers import PDSolver
+from potentia.collision import ContinuousCollision
+from potentia.renderers import GGIRenderer
+from potentia.world import SimulationWorld
+from potentia.objects import TetMeshObject
 
 ti.init(arch=ti.gpu)
 
