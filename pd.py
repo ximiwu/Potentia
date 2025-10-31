@@ -28,73 +28,69 @@ class DummyCollisionHandler(ICollisionHandler):
 
 
 
-def main():
-    ti.init(arch=ti.cuda)
+ti.init(arch=ti.cuda)
 
-    # 1. 组装仿真世界的各个模块
-    # 为网格对象增加自由度上限
-    sim_data = MassPointData(max_point_num=10000)
+# 1. 组装仿真世界的各个模块
+# 为网格对象增加自由度上限
+sim_data = MassPointData(max_point_num=10000)
 
-    energies_to_register = [PDBendingEnergy.get_instance(), PDStrainEnergy.get_instance()]
-    # 关键：PD 需要把 data 传入求解器构造函数
-    solver = PDSolver(data=sim_data, iterations=5)
-    integrator = ImplicitEulerIntegrator()
-    renderer = MeshRenderer(title="PD Mesh Simulation")
-    collision_handler = DummyCollisionHandler()
+energies_to_register = [PDBendingEnergy.get_instance(), PDStrainEnergy.get_instance()]
+# 关键：PD 需要把 data 传入求解器构造函数
+solver = PDSolver(data=sim_data, iterations=5)
+integrator = ImplicitEulerIntegrator()
+renderer = MeshRenderer(title="PD Mesh Simulation")
+collision_handler = DummyCollisionHandler()
 
-    input_handler = FPInputHandler()
-    input_handler.set_paused_state(True)
+input_handler = FPInputHandler()
+input_handler.set_paused_state(True)
 
-    recorder = FrameRecorder(output_dir="captures/pd", mode=RecordingMode.RUNNING_ONLY, make_video=True, fps=60)
+recorder = FrameRecorder(output_dir="captures/pd", mode=RecordingMode.RUNNING_ONLY, make_video=True, fps=60)
 
-    world = SimulationWorld(data=sim_data, 
-                                solver=solver, 
-                                integrator=integrator, 
-                                collision_handler=collision_handler, 
-                                renderer=renderer,
-                                energies=energies_to_register,
-                                input_handler=input_handler,
-                                recorder=recorder)
+world = SimulationWorld(data=sim_data, 
+                            solver=solver, 
+                            integrator=integrator, 
+                            collision_handler=collision_handler, 
+                            renderer=renderer,
+                            energies=energies_to_register,
+                            input_handler=input_handler,
+                            recorder=recorder)
 
-    # 2. 添加外力
-    gravity = GravityForce(gravity=tm.vec3(0.0, -9.8, 0.0))
-    world.add_force(gravity)
+# 2. 添加外力
+gravity = GravityForce(gravity=tm.vec3(0.0, -9.8, 0.0))
+world.add_force(gravity)
 
-    # 3. 创建并添加仿真对象
-    cube_mesh = TriMesh.create_cube()
-    sphere_mesh = TriMesh.create_sphere(radius=0.2, subdivisions=2)
-    cloth_mesh = TriMesh.from_obj("models/plane_30x30.obj")
-    triangle_mesh = TriMesh.create_triangle((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 0.0))
+# 3. 创建并添加仿真对象
+cube_mesh = TriMesh.create_cube()
+sphere_mesh = TriMesh.create_sphere(radius=0.2, subdivisions=2)
+cloth_mesh = TriMesh.from_obj("models/plane_30x30.obj")
+triangle_mesh = TriMesh.create_triangle((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 0.0))
 
-    cube_mesh.materialize()
-    sphere_mesh.materialize()
-    cloth_mesh.materialize()
-    triangle_mesh.materialize()
+cube_mesh.materialize()
+sphere_mesh.materialize()
+cloth_mesh.materialize()
+triangle_mesh.materialize()
 
-    obj1 = MeshObject(mesh=cloth_mesh, data=sim_data, translation=(1.0, 1.0, 1.0), face_color=(0.9, 0.3, 0.3), rotation=(30, 15, 60))
-
-
-    obj1.add_pd_bending_energy(1e2)
-    obj1.add_pd_strain_energy(1e6, 0.5, 1.5)
-    obj1.set_mass(0, -1.0)
-    
-
-    world.add_object(obj1)
+obj1 = MeshObject(mesh=cloth_mesh, data=sim_data, translation=(1.0, 1.0, 1.0), face_color=(0.9, 0.3, 0.3), rotation=(30, 15, 60))
 
 
-    # 关键：PD 需要在进入主循环前构建并分解一次 LHS（若 DoF/约束 或 dt 改变需重新调用）
-    dt = 1.0 / 60.0
-    solver.build_lhs(sim_data, dt)
+obj1.add_pd_bending_energy(1e2)
+obj1.add_pd_strain_energy(1e6, 0.5, 1.5)
+obj1.set_mass(0, -1.0)
 
 
-    # 4. 运行仿真主循环
-    frame = 0
-    recorder.start()
-    while renderer.is_window_running():
-        world.step(dt=dt)
-        frame += 1
+world.add_object(obj1)
 
-    recorder.stop()
 
-if __name__ == "__main__":
-    main()
+# 关键：PD 需要在进入主循环前构建并分解一次 LHS（若 DoF/约束 或 dt 改变需重新调用）
+dt = 1.0 / 60.0
+solver.build_lhs(sim_data, dt)
+
+
+# 4. 运行仿真主循环
+frame = 0
+recorder.start()
+while renderer.is_window_running():
+    world.step(dt=dt)
+    frame += 1
+
+recorder.stop()
