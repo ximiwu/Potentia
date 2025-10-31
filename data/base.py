@@ -39,6 +39,11 @@ class ISimulationData(abc.ABC):
         pass
 
     @abc.abstractmethod
+    def get_max_num_dofs(self) -> int:
+        """Returns the maximum number of degrees of freedom."""
+        pass
+
+    @abc.abstractmethod
     def allocate_dofs(self, num_dofs: int) -> int:
         """
         Allocates space for a number of DoFs and returns the starting offset.

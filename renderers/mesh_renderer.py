@@ -6,7 +6,7 @@ import taichi as ti
 from data.base import ISimulationData
 from mesh.base import IMesh, ISurfaceDataProvider
 from objects.base import IMeshObject, ISimulationObject
-from renderers.base import IRenderer
+from .base import IRenderer
 
 
 

@@ -1,10 +1,11 @@
 import abc
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Type, TypeVar
 
 import taichi as ti
 
 from data.base import ISimulationData
 
+T_PE = TypeVar("T_PE", bound="PotentialEnergy")
 
 @ti.data_oriented
 class IPotentialEnergy(abc.ABC):
@@ -37,28 +38,24 @@ class IPotentialEnergy(abc.ABC):
     # The following methods are Taichi functions (@ti.func) that will be called
     # from within a Taichi kernel in the global container, dispatched via ti.static.
     # They operate on a single constraint. A concrete class must implement the ones it needs.
-
     def compute_energy_func(self, constraint: ti.template(), data: ISimulationData) -> ti.f32:
         """
         Computes the energy for a single constraint.
         This should be implemented as a @ti.func.
         """
         return 0.0
-
     def compute_gradient_func(self, constraint: ti.template(), data: ISimulationData, out_grad: ti.template()):
         """
         Computes the gradient for a single constraint and adds it to the output.
         This should be implemented as a @ti.func.
         """
         pass
-
     def compute_hessian_func(self, constraint: ti.template(), data: ISimulationData, out_hessian_builder: Any):
         """
         Computes the Hessian for a single constraint and adds it to the output.
         This should be implemented as a @ti.func.
         """
         pass
-
     def compute_constraint_gradient_func(self, constraint: ti.template(), q: ti.template()):
         """
         Computes the constraint value C and gradient nabla_C for a single constraint.
@@ -69,14 +66,62 @@ class IPotentialEnergy(abc.ABC):
         3. num_vertices (int): The number of active vertices for this constraint.
         """
         pass
-
-    def gather_projection_func(self, constraint: ti.template(), data: ISimulationData, **kwargs):
+    def compute_pd_rhs_vec_func(self,
+                                constraint: ti.template(),
+                                q_predict: ti.template(),
+                                vertex_adj_offsets: ti.template(),
+                                vertex_adj_indices: ti.template(),
+                                vertex_adj_cotan_weights: ti.template(),
+                                out_rhs: ti.template()):
         """
-        Performs local-global gather step for a single constraint for Projective Dynamics.
-        This should be implemented as a @ti.func.
+        (@ti.func) 为单个约束计算 PD 的局部结果并将其贡献累加到全局右手边向量。
+
+        约定：
+        - q_predict: data.get_predicted_dofs()，长度为全局 DoF 数，元素为 vec3。
+        - vertex_adj_*: 从 ISimulationData.get_vertex_adjacency() 获取的 CSR 邻接与与其对齐的 cotan 权重。
+        - out_rhs: 右手边累加缓冲，推荐为 Struct.field({"x","y","z"})，能量内部对 out_rhs[...] 的 x/y/z 分量使用 atomic_add 原地累加。
         """
         pass
 
+    def compute_pd_lhs_mat_func(self, constraint: ti.template(), data: ISimulationData) -> ti.linalg.SparseMatrix:
+        """
+        （可选）返回“单个约束”的 PD LHS 稀疏矩阵贡献（ti.linalg.SparseMatrix）。
+        容器会遍历所有约束，并按类型分发调用本函数，再将返回矩阵累加。
+        """
+        raise NotImplementedError
+
+
+@ti.data_oriented
+class PotentialEnergy(IPotentialEnergy, abc.ABC):
+    """
+    抽象能量基类：统一提供
+    - 单例获取 get_instance()
+    - 类型 ID 访问 get_type_id()（要求子类定义 TYPE_ID:int）
+    - 二次实例化防护（要求子类 __init__ 调用 super().__init__()）
+    """
+
+    _instance: Optional["PotentialEnergy"] = None
+    TYPE_ID: int = -1  # 子类必须覆盖为非负整数
+
+    @classmethod
+    def get_instance(cls: Type[T_PE]) -> T_PE:
+        if getattr(cls, "_instance", None) is None:
+            cls._instance = cls()  # type: ignore[misc]
+        return cls._instance  # type: ignore[return-value]
+
+    @classmethod
+    def get_type_id(cls) -> int:
+        type_id = getattr(cls, "TYPE_ID", None)
+        if not isinstance(type_id, int) or type_id < 0:
+            raise RuntimeError(f"{cls.__name__}.TYPE_ID 未定义或非法（需为非负整数）。")
+        return type_id
+
+    def __init__(self) -> None:
+        # 防止直接多次 new 子类（单例约束）
+        if getattr(self.__class__, "_instance", None) is not None:
+            raise RuntimeError(f"Error: Attempting to re-instantiate singleton {self.__class__.__name__}.")
+        # 这里不要缓存 GlobalEnergyContainer，避免 base 与 container 的循环依赖
+        self.__class__._instance = self
 
 @ti.data_oriented
 class IGlobalEnergyContainer(abc.ABC):
@@ -116,9 +161,29 @@ class IGlobalEnergyContainer(abc.ABC):
 
 
     @abc.abstractmethod
-    def gather_projection(self, data: ISimulationData, **kwargs):
-        """(Optional) Performs local-global gather step for Projective Dynamics for all constraints."""
+    def compute_pd_rhs_init_vec(self, data: ISimulationData, out_vec: ti.Field, dt: float) -> None:
+        """
+        计算每次迭代不变的 PD 右手边初始化向量：
+        out[i] = masses[i] / (dt * dt) * q_predict[i]
+        """
         pass
+
+    
+    @abc.abstractmethod
+    def compute_pd_rhs_vec(self, data: ISimulationData, out_vec: ti.Field, init_vec: ti.Field) -> None:
+        """
+        以 init_vec 作为起始值填充 out_vec，然后启动 kernel 对各个约束计算局部项并累加到 out_vec。
+        """
+        pass
+
+    @abc.abstractmethod
+    def compute_pd_lhs_mat(self, data: ISimulationData, dt: float) -> ti.linalg.SparseMatrix:
+        """
+        装配并返回 PD 的 LHS：N×N 标量稀疏矩阵（ti.linalg.SparseMatrix）。
+        要求在该方法内写入质量对角 M/dt^2，并遍历所有约束，按约束类型分发到对应能量的
+        compute_pd_lhs_mat_func(constraint, data) 获取单约束贡献矩阵并相加。
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def register_energy(self, energy: IPotentialEnergy):
@@ -140,4 +205,8 @@ class IGlobalEnergyContainer(abc.ABC):
         """Clears only the dynamic (temporary) constraints, keeping the static ones."""
         pass
 
-
+    @classmethod
+    @abc.abstractmethod
+    def get_instance(self):
+        """Clears only the dynamic (temporary) constraints, keeping the static ones."""
+        pass

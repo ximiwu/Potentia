@@ -4,7 +4,6 @@ from typing import Any, Optional, Tuple
 import taichi as ti
 
 from data.base import ISimulationData
-from energies.base import IPotentialEnergy
 from mesh.base import IMesh
 
 

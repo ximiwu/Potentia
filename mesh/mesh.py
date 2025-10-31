@@ -4,7 +4,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import taichi as ti
 
-from mesh.base import IMesh
+from .base import IMesh
 
 
 

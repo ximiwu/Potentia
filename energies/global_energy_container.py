@@ -4,7 +4,7 @@ import numpy as np
 import taichi as ti
 
 from data.base import ISimulationData
-from energies.base import IGlobalEnergyContainer, IPotentialEnergy
+from .base import IGlobalEnergyContainer, IPotentialEnergy
 
 
 @ti.data_oriented
@@ -47,10 +47,10 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
         self.num_active_constraints = ti.field(dtype=ti.i32, shape=())
         self.num_static_constraints = ti.field(dtype=ti.i32, shape=())
         
-        # self.root = ti.root.dynamic(ti.i, self.max_constraints, chunk_size=1024)
-        self.root = ti.root.dense(ti.i, 100000)
+        self.root = ti.root.dynamic(ti.i, self.max_constraints, chunk_size=1024)
+        # self.root = ti.root.dense(ti.i, 100000)
         self.root.place(self.constraints)
-        
+
         self.registered_energies: Dict[int, IPotentialEnergy] = {}
         
         # Set the class instance variable
@@ -143,11 +143,132 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
         print("Warning: GlobalEnergyContainer.compute_hessian is not implemented.")
         pass
 
-    def gather_projection(self, data: ISimulationData, **kwargs):
-        # This is a placeholder for the gather projection step.
-        # A concrete kernel would be needed here, likely with a more specific signature.
-        print("Warning: GlobalEnergyContainer.gather_projection is not implemented.")
-        pass
+    def compute_pd_rhs_init_vec(self, data: ISimulationData, out_vec: ti.template(), dt: float):
+        """
+        计算rhs vec每次迭代都相同的部分
+        """
+        q_predict = data.get_predicted_dofs()
+        masses = data.get_masses()
+        n = data.get_num_dofs()
+        self._compute_pd_rhs_init_vec_kernel(q_predict, masses, n, dt, out_vec)
+
+    @ti.kernel
+    def _compute_pd_rhs_init_vec_kernel(self,
+                                        q_predict: ti.template(),
+                                        masses: ti.template(),
+                                        n: ti.i32,
+                                        dt: ti.f32,
+                                        out_vec: ti.template()):
+        inv_dt2 = 1.0 / (dt * dt)
+        for i in range(n):
+            m = masses[i]
+            if m > 0.0:
+                out_vec[i] = (m * inv_dt2) * q_predict[i]
+            else:
+                out_vec[i] = ti.Vector([0.0, 0.0, 0.0])
+
+    
+
+    
+    def compute_pd_rhs_vec(self, data: ISimulationData, out_vec: ti.template(), init_vec: ti.template()):
+        """
+        启动 kernel 计算各能量的 PD 局部项并装配到全局右手边向量。
+
+        约定 out_vec 为一个 ti.Vector.field(3, ...)，
+        能量内部通过 atomic_add 对其进行原地累加。
+        """
+        # 先将 out_vec 写成 init_vec
+        qn = data.get_num_dofs()
+        self._copy_vec_kernel(init_vec, qn, out_vec)
+
+        q_predict = data.get_predicted_dofs()
+        # 从 ISimulationData 获取 CSR 顶点邻接与与其对齐的 cotan 权重
+        offsets, info = data.get_vertex_adjacency()
+
+        self._compute_pd_rhs_vec_kernel(
+            q_predict,
+            offsets,
+            info.vertex_adj_indices,
+            info.vertex_adj_cotan_weights,
+            out_vec
+        )
+
+    @ti.kernel
+    def _copy_vec_kernel(self, src: ti.template(), n: ti.i32, dst: ti.template()):
+        for i in range(n):
+            dst[i] = src[i]
+
+    @ti.kernel
+    def _compute_pd_rhs_vec_kernel(self,
+                                   q_predict: ti.template(),
+                                   vertex_adj_offsets: ti.template(),
+                                   vertex_adj_indices: ti.template(),
+                                   vertex_adj_cotan_weights: ti.template(),
+                                   out_vec: ti.template()):
+        for i in range(self.num_active_constraints[None]):
+            c = self.constraints[i]
+            for type_id in ti.static(list(self.registered_energies.keys())):
+                if c.constraint_type == type_id:
+                    self.registered_energies[type_id].compute_pd_rhs_vec_func(
+                        c,
+                        q_predict,
+                        vertex_adj_offsets,
+                        vertex_adj_indices,
+                        vertex_adj_cotan_weights,
+                        out_vec
+                    )
+
+    @ti.kernel
+    def _fill_mass_lhs(self,
+                        masses: ti.template(),
+                        n: ti.i32,
+                        inv_dt2: ti.f32,
+                        out_builder: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            m = masses[i]
+            if m > 0.0:
+                out_builder[i, i] += m * inv_dt2
+
+    def compute_pd_lhs_mat(self, 
+                           data: ISimulationData, 
+                           dt: float) -> ti.linalg.SparseMatrix:
+        """
+        装配并返回 PD 的 LHS（N×N 标量稀疏矩阵）。
+        - 写入质量对角 M/dt^2（Python 侧构造）
+        - 遍历所有已注册能量，若其实现了 compute_pd_lhs_mat_func(data)，则将其返回稀疏矩阵相加
+        """
+
+        n = data.get_num_dofs()
+        masses = data.get_masses()
+
+        # 1) 质量对角（M/dt^2） —— 在 kernel 内填充 builder
+        inv_dt2 = 1.0 / (dt * dt)
+        mass_builder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=n)
+        self._fill_mass_lhs(masses, n, inv_dt2, mass_builder)
+        lhs = mass_builder.build()
+
+        # 2) 遍历每个约束，按类型分发到对应能量，累加“单约束”贡献矩阵
+        num_constraints = self.num_active_constraints[None]
+        for i in range(num_constraints):
+            c = self.constraints[i]
+            type_id = int(c.constraint_type)
+            energy = self.registered_energies.get(type_id, None)
+            if energy is None:
+                continue
+            try:
+                contrib = energy.compute_pd_lhs_mat_func(c, data)
+            except NotImplementedError:
+                contrib = None
+            except Exception as e:
+                print(f"Warning: {energy.__class__.__name__}.compute_pd_lhs_mat_func 约束 {i} 失败：{e}")
+                contrib = None
+
+            if contrib is not None:
+                lhs = lhs + contrib
+
+        return lhs
+
+
 
     @ti.func
     def compute_one_constraint_gradient_func(self, i: int, q: ti.template()):

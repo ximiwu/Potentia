@@ -6,7 +6,7 @@ import taichi as ti
 
 from data.base import ISimulationData
 from forces.base import IForce
-from integrators.base import IIntegrator
+from .base import IIntegrator
 
 
 @ti.data_oriented

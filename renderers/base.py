@@ -5,6 +5,7 @@ import taichi as ti
 
 from data.base import ISimulationData
 from objects.base import ISimulationObject
+
 from world.base import ISimulationWorld
 
 

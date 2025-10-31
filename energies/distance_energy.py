@@ -2,39 +2,22 @@ import taichi as ti
 import numpy as np
 from typing import TYPE_CHECKING, Tuple
 
-from energies.base import IPotentialEnergy
-from energies.global_energy_container import GlobalEnergyContainer
-
-if TYPE_CHECKING:
-    from data.base import ISimulationData
+from .base import PotentialEnergy
+from .global_energy_container import GlobalEnergyContainer
 
 
 @ti.data_oriented
-class DistanceEnergy(IPotentialEnergy):
+class DistanceEnergy(PotentialEnergy):
     """
     Defines the computation for distance constraints.
     This class is stateless and operates on data stored in the global container.
     """
-    _instance = None
     TYPE_ID = 0
 
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = DistanceEnergy()
-        return cls._instance
-
     def __init__(self):
-        if DistanceEnergy._instance is not None:
-            raise RuntimeError("Error: Attempting to re-instantiate a singleton class.")
+        super().__init__()
         # Cache the global container instance for use inside Taichi funcs via ti.static
         self._container = GlobalEnergyContainer.get_instance()
-
-        DistanceEnergy._instance = self
-
-    @classmethod
-    def get_type_id(cls) -> int:
-        return cls.TYPE_ID
 
     @ti.func
     def add_one_constraint_func(self,

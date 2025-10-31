@@ -3,10 +3,10 @@ from typing import TYPE_CHECKING, List
 import taichi as ti
 
 from energies.global_energy_container import GlobalEnergyContainer
-from solvers.base import ISolver
+from .base import ISolver
 
 if TYPE_CHECKING:
-    from data.base import ISimulationData
+    from data import ISimulationData
 
 
 

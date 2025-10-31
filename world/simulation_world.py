@@ -9,13 +9,13 @@ from energies.global_energy_container import GlobalEnergyContainer
 from forces.base import IForce
 from integrators.base import IIntegrator
 from objects.base import ISimulationObject
-from renderers.base import IRenderer
 from solvers.base import ISolver
-from world.base import ISimulationWorld
+from .base import ISimulationWorld
 from controller.base import IInputHandler
+from renderers.base import IRenderer
 
 
-class XPBDSimulationWorld(ISimulationWorld):
+class SimulationWorld(ISimulationWorld):
     def __init__(
             self,
             data: ISimulationData,
