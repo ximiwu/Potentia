@@ -1,3 +1,266 @@
+# Potentia: A Unified, Research-Oriented Physics Simulation Framework
+
+**Potentia** (from the Latin for "Potential Energy") is a high-performance, modular physics simulation framework based on [Taichi](https://github.com/taichi-dev/taichi).
+
+Its core design is built on a unified perspective: **all physical constraints are abstracted as "Potential Energy" (`IPotentialEnergy`), and all simulation methods (PBD, XPBD, PD...) are abstracted as "Optimizers" (`ISolver`) that solve energy minimization problems.**
+
+This project aims to provide researchers in computer graphics and physics simulation with a clear, decoupled, and easily extensible platform, enabling them to **conveniently implement, validate, and compare different physics simulation methods**.
+
+It is not limited to any specific solver but instead provides a set of universal "building blocks":
+
+  * Want to research a new energy model? Simply implement a new `IPotentialEnergy`.
+  * Want to test a new solving strategy? Simply implement a new `ISolver`.
+  * Want to mix and match? The framework's decoupled design allows you to freely combine different energy terms and solvers.
+
+This project currently focuses on Finite Element Method (FEM)-based continuum mechanics (e.g., elastic soft bodies) and includes built-in, runnable implementations of Position Based Dynamics (PBD) and Projective Dynamics (PD).
+
+## Core Features
+
+  * **Energy-Driven Unified Architecture**: Whether it's the hard constraints of PBD or the quadratic energy function of PD, all are unified under the `IPotentialEnergy` interface. This keeps the framework neutral to the simulation method.
+  * **Extensibility Born for Research**: Strict dependency inversion and interface segregation allow researchers to swap any core component of the framework (`ISolver`, `IIntegrator`, `IPotentialEnergy`) like Lego blocks, without modifying the framework itself.
+  * **High-Performance Taichi Backend**: All intensive computations (energy, gradients, projections) are executed in parallel within Taichi Kernels, ensuring real-time simulation performance.
+  * **Clear Separation of Concerns (Python vs. Taichi)**:
+      * **Python (Host Side)**: Responsible for high-level logic orchestration, object creation, dependency injection, and the main loop.
+      * **Taichi (Compute Side)**: Responsible for all low-level mathematical and physical computations.
+  * **Out-of-the-Box Implementations**: Includes complete implementations of PBD and PD solvers, which can serve as a baseline for research and learning.
+
+## Architecture Philosophy: Everything is Energy Minimization
+
+The core of Potentia is the decoupling of the `ISolver` (optimizer) and the `IPotentialEnergy` (physical model).
+
+1.  **`IIntegrator` (Integrator)**: Responsible for time integration, calculating a "predicted" position $s$ (e.g., using implicit Euler: $s = q_n + \Delta t v_n + \Delta t^2 M^{-1} f_{ext}$).
+2.  **`ISolver` (Solver)**: Accepts the predicted position $s$ as input. Its **sole** objective is to find a new position $q_{n+1}$ that minimizes the sum of all registered `IPotentialEnergy` terms.
+3.  **`IPotentialEnergy` (Energy Term)**: Defines the mathematical form of the physical model (e.g., strain energy for PD, or distance constraints for PBD). It exposes methods to the `ISolver` for calculating energy, gradients, or performing projections.
+
+This design makes the framework extremely flexible:
+
+  * **PBD Solver (`PBD_Solver`)**: Takes $s$ as an initial guess, then iteratively "projects" all constraints provided by the `IPotentialEnergy` terms.
+  * **PD Solver (`PD_Solver`)**: Uses $s$ as the $s$-point for the PD inertial term, then performs Local-Global iterations to minimize the quadratic energy function.
+  * **XPBD Solver (`XPBD_Solver`)**: Can be implemented as an `ISolver` that collects constraint gradients from `IPotentialEnergy` and updates positions using $\Delta \lambda$.
+
+### Architecture Component Diagram
+
+```mermaid
+graph TD
+    subgraph "Python (Logic Orchestration)"
+        World[XPBDSimulationWorld]
+        Integrator[IIntegrator]
+        Solver[ISolver]
+        Input[IInputHandler]
+        Renderer[IRenderer]
+    end
+
+    subgraph "Taichi (High-Performance Computation)"
+        Data[ISimulationData]
+        Container[IGlobalEnergyContainer]
+        Energy[IPotentialEnergy]
+    end
+
+    World -- "Owns" --> Integrator
+    World -- "Owns" --> Solver
+    World -- "Owns" --> Input
+    World -- "Owns" --> Renderer
+    World -- "Owns" --> Data
+
+    World -- "step()" --> Integrator -- "1. predict()" --> Data
+    World -- "step()" --> Solver -- "2. solve()" --> Container
+    World -- "step()" --> Integrator -- "3. update_state()" --> Data
+    World -- "step()" --> Renderer -- "4. render()" --> Data
+    
+    Solver -- "Depends on" --> Container
+    Container -- "Contains multiple" --> Energy
+```
+
+## Example: `xpbd.py`
+
+The framework's assembly is done entirely on the Python side, demonstrating its clear separation of logic:
+
+```python
+import abc
+from typing import List
+
+import taichi as ti
+import taichi.math as tm
+
+from collision.base import ICollisionHandler
+from data.base import ISimulationData
+from data.mass_point_data import MassPointData
+from energies.distance_energy import DistanceEnergy
+from forces.gravity_force import GravityForce
+from integrators.implicit_euler_integrator import ImplicitEulerIntegrator
+from mesh.trimesh import TriMesh
+from objects.mesh_object import MeshObject
+from renderers.mesh_renderer import MeshRenderer
+from solvers.xpbd_solver import XPBDSolver
+from world.simulation_world import SimulationWorld
+from controller.fp_input_handler import FPInputHandler
+
+# Define a simple collision handler, which does nothing in this example
+class DummyCollisionHandler(ICollisionHandler):
+    def detect_and_create_potentials(self, data: ISimulationData, q_predict: ti.Field) -> List:
+        return []
+
+
+ti.init(arch=ti.cuda)
+
+# 1. Assemble the simulation world's modules
+# Set the max number of points for mesh objects
+sim_data = MassPointData(max_point_num=10000)
+
+energies_to_register = [DistanceEnergy.get_instance()]
+solver = XPBDSolver(iterations=20)
+integrator = ImplicitEulerIntegrator()
+renderer = MeshRenderer(title="XPBD Mesh Simulation")
+collision_handler = DummyCollisionHandler()
+
+input_handler = FPInputHandler()
+
+world = SimulationWorld(data=sim_data, 
+                        solver=solver, 
+                        integrator=integrator, 
+                        collision_handler=collision_handler, 
+                        renderer=renderer,
+                        energies=energies_to_register,
+                        input_handler=input_handler)
+
+# 2. Add external forces
+gravity = GravityForce(gravity=tm.vec3(0.0, -9.8, 0.0))
+world.add_force(gravity)
+
+
+# 3. Create and add simulation objects (e.g., sphere)
+
+cube_mesh = TriMesh.create_cube()
+sphere_mesh = TriMesh.create_sphere(radius=0.2, subdivisions=2)
+cloth_mesh = TriMesh.from_obj("models/plane_30x30.obj")
+
+cube_mesh.materialize()
+sphere_mesh.materialize()
+cloth_mesh.materialize()
+
+
+cube_obj1 = MeshObject(mesh=cube_mesh, data=sim_data, translation=(0.0, 2.0, 0.0), face_color=(0.9, 0.3, 0.3))
+cube_obj1.add_xpbd_distance_energy(stiffness=1e4)
+cube_obj1.set_mass(0, -1.0)
+world.add_object(cube_obj1)
+
+
+# 4. Run the main simulation loop
+frame = 0
+while renderer.is_window_running():
+    world.step(dt=1.0 / 60.0)
+    frame += 1
+
+```
+
+## Example: `pd.py`
+
+To change from XPBD to PD, simply replace the solver and energy.
+
+```python
+import abc
+from typing import List, Dict, Any
+import json
+
+import taichi as ti
+import taichi.math as tm
+
+from collision.base import ICollisionHandler
+from data.base import ISimulationData
+from energies.base import IGlobalEnergyContainer
+from data.mass_point_data import MassPointData
+from energies.pd_bending_energy import PDBendingEnergy
+from energies.pd_strain_energy import PDStrainEnergy
+from forces.gravity_force import GravityForce
+from integrators.implicit_euler_integrator import ImplicitEulerIntegrator
+from mesh.trimesh import TriMesh
+from objects.mesh_object import MeshObject
+from renderers.mesh_renderer import MeshRenderer
+from solvers.pd_solver import PDSolver
+from world.simulation_world import SimulationWorld
+from controller.fp_input_handler import FPInputHandler
+from recorders import FrameRecorder, RecordingMode
+
+# Define a simple collision handler, which does nothing in this example
+class DummyCollisionHandler(ICollisionHandler):
+    def detect_and_create_potentials(self, data: ISimulationData, q_predict: ti.Field) -> List:
+        return []
+
+
+
+def main():
+    ti.init(arch=ti.cuda)
+
+    # 1. Assemble the simulation world's modules
+    # Set the max number of points
+    sim_data = MassPointData(max_point_num=10000)
+
+    energies_to_register = [PDBendingEnergy.get_instance(), PDStrainEnergy.get_instance()]
+    # Key: PD requires passing the `data` to the solver's constructor
+    solver = PDSolver(data=sim_data, iterations=5)
+    integrator = ImplicitEulerIntegrator()
+    renderer = MeshRenderer(title="PD Mesh Simulation")
+    collision_handler = DummyCollisionHandler()
+
+    input_handler = FPInputHandler()
+    input_handler.set_paused_state(True)
+
+    recorder = FrameRecorder(output_dir="captures/pd", mode=RecordingMode.RUNNING_ONLY, make_video=True, fps=60)
+
+    world = SimulationWorld(data=sim_data, 
+                            solver=solver, 
+                            integrator=integrator, 
+                            collision_handler=collision_handler, 
+                            renderer=renderer,
+                            energies=energies_to_register,
+                            input_handler=input_handler,
+                            recorder=recorder)
+
+    # 2. Add external forces
+    gravity = GravityForce(gravity=tm.vec3(0.0, -9.8, 0.0))
+    world.add_force(gravity)
+
+    # 3. Create and add simulation objects
+    cube_mesh = TriMesh.create_cube()
+    sphere_mesh = TriMesh.create_sphere(radius=0.2, subdivisions=2)
+    cloth_mesh = TriMesh.from_obj("models/plane_30x30.obj")
+    triangle_mesh = TriMesh.create_triangle((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 0.0))
+
+    cube_mesh.materialize()
+    sphere_mesh.materialize()
+    cloth_mesh.materialize()
+    triangle_mesh.materialize()
+
+    obj1 = MeshObject(mesh=cloth_mesh, data=sim_data, translation=(1.0, 1.0, 1.0), face_color=(0.9, 0.3, 0.3), rotation=(30, 15, 60))
+
+
+    obj1.add_pd_bending_energy(1e2)
+    obj1.add_pd_strain_energy(1e6, 0.5, 1.5)
+    obj1.set_mass(0, -1.0)
+    
+
+    world.add_object(obj1)
+
+
+    # Key: PD needs to build and factorize the LHS once before the main loop (must be re-called if DoF/constraints or dt changes)
+    dt = 1.0 / 60.0
+    solver.build_lhs(sim_data, dt)
+
+
+    # 4. Run the main simulation loop
+    frame = 0
+    recorder.start()
+    while renderer.is_window_running():
+        world.step(dt=dt)
+        frame += 1
+
+    recorder.stop()
+
+if __name__ == "__main__":
+    main()
+
+```
+
 # Potentia: 一个面向研究的统一物理模拟框架
 
 **Potentia** (源自拉丁语“势能”) 是一个基于 [Taichi](https://github.com/taichi-dev/taichi) 的高性能、模块化物理模拟框架。
