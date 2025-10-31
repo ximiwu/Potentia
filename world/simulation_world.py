@@ -13,6 +13,7 @@ from solvers.base import ISolver
 from .base import ISimulationWorld
 from controller.base import IInputHandler
 from renderers.base import IRenderer
+from recorders.base import IRecorder
 
 
 class SimulationWorld(ISimulationWorld):
@@ -25,6 +26,7 @@ class SimulationWorld(ISimulationWorld):
             renderer: IRenderer,
             energies: List[IPotentialEnergy],
             input_handler: Optional[IInputHandler] = None,
+            recorder: Optional[IRecorder] = None,
     ):
         self.data = data
         self.solver = solver
@@ -33,6 +35,7 @@ class SimulationWorld(ISimulationWorld):
         self.renderer = renderer
         self.energies = energies
         self.input_handler = input_handler
+        self.recorder = recorder
         self.objects: List[ISimulationObject] = []
         self.forces: List[IForce] = []
         
@@ -56,6 +59,8 @@ class SimulationWorld(ISimulationWorld):
             # 暂停时仅绘制 UI 与渲染，不做任何物理与约束更新
             self.input_handler.draw_ui(self, self.renderer)
             self.renderer.render(self.data, self.objects)
+            if self.recorder is not None:
+                self.recorder.on_frame_end(self.renderer, True)
             return
 
         self.energy_container.clear_dynamic_constraints()
@@ -71,3 +76,5 @@ class SimulationWorld(ISimulationWorld):
             self.input_handler.draw_ui(self, self.renderer)
 
         self.renderer.render(self.data, self.objects)
+        if self.recorder is not None:
+            self.recorder.on_frame_end(self.renderer, False)

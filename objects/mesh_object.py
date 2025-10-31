@@ -234,7 +234,7 @@ class MeshObject(IMeshObject):
         if mass == -1.0:
             # Pinned vertex per spec: inv_mass = 0, mass = -1
             inv_mass_val = 0.0
-            mass_val = -1.0
+            mass_val = 1e9
         else:
             if mass <= 0.0:
                 raise ValueError("mass must be positive, or -1 for pinned vertex")

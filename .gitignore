@@ -31,3 +31,6 @@ Thumbs.db
 
 # Cursor / 临时
 .cursor/
+
+captures/
+debugger.py

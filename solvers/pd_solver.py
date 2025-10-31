@@ -1,4 +1,4 @@
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import numpy as np
 import taichi as ti
@@ -6,8 +6,7 @@ import taichi as ti
 from energies.global_energy_container import GlobalEnergyContainer
 from .base import ISolver
 
-if TYPE_CHECKING:
-    from data import ISimulationData
+from data.base import ISimulationData
 
 
 @ti.data_oriented

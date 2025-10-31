@@ -55,10 +55,6 @@ class FPInputHandler(IInputHandler):
             self._paused = not self._paused
         self._space_was_pressed = space_pressed_now
 
-        # 若暂停，仅允许 UI 和渲染，不进行移动
-        if self._paused:
-            return
-
         # 相机当前位置与朝向
         move = ti.Vector([0.0, 0.0, 0.0])
         speed = self._move_speed * dt
@@ -178,6 +174,9 @@ class FPInputHandler(IInputHandler):
 
     def is_paused(self) -> bool:
         return self._paused
+
+    def set_paused_state(self, paused: bool):
+        self._paused = paused
 
     def draw_ui(self, world: ISimulationWorld, renderer: IRenderer) -> None:
         # 通过渲染器窗口的 GUI 提供最小 UI：暂停/继续、重置按钮

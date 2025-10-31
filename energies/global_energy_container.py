@@ -47,8 +47,8 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
         self.num_active_constraints = ti.field(dtype=ti.i32, shape=())
         self.num_static_constraints = ti.field(dtype=ti.i32, shape=())
         
-        self.root = ti.root.dynamic(ti.i, self.max_constraints, chunk_size=1024)
-        # self.root = ti.root.dense(ti.i, 100000)
+        # self.root = ti.root.dynamic(ti.i, self.max_constraints, chunk_size=1024)
+        self.root = ti.root.dense(ti.i, 100000)
         self.root.place(self.constraints)
 
         self.registered_energies: Dict[int, IPotentialEnergy] = {}

@@ -141,13 +141,14 @@ class TriMesh(
             else:
                 e1 = eab / ab_len
                 n_unit = cross_pa / cross_len
-                e2 = np.cross(n_unit, e1)
+                e2 = np.cross(e1, n_unit)
                 e2_len = float(np.linalg.norm(e2))
                 if e2_len <= eps_area:
                     local2d_zero_count += 1
                 else:
                     e2 = e2 / e2_len
                     # Project (b-a) and (c-a) onto (e1, e2)
+                    # convert to a-b , a-c
                     u1 = -float(np.dot(eab, e1))
                     v1 = -float(np.dot(eab, e2))
                     u2 = -float(np.dot(eac, e1))
@@ -410,3 +411,18 @@ class TriMesh(
         final_vertices_np = apply_transform_numpy(vertices_np, total_translation, rotation, scale)
 
         return cls(vertices=final_vertices_np, faces=faces_np, edges=edges_np)
+
+    @classmethod
+    def create_triangle(
+        cls: Type['TriMesh'],
+        p0: Tuple[float, float, float],
+        p1: Tuple[float, float, float],
+        p2: Tuple[float, float, float],
+    ) -> 'TriMesh':
+        """
+        [Public Factory] Creates a TriMesh consisting of a single triangle defined by three points.
+        """
+        vertices_np = np.asarray([p0, p1, p2], dtype=np.float32)
+        faces_np = np.asarray([[0, 1, 2]], dtype=np.int32)
+        edges_np = np.asarray([[0, 1], [1, 2], [0, 2]], dtype=np.int32)
+        return cls(vertices=vertices_np, faces=faces_np, edges=edges_np)

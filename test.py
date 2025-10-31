@@ -78,8 +78,11 @@ def test_svd_3x2():
         [3.0, 4.0, 0.0],
         [5.0, 6.0, 0.0]
     ])
-    
+    print(A[2, 1])
+
     U, S, VT = ti.svd(A)
+
+    print(U@S@VT.transpose())
     
     print("--- Taichi 3x2 SVD (通过 3x3 填充) ---")
     print("A (3x2) =\n", A)

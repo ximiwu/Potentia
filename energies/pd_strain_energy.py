@@ -34,7 +34,7 @@ class PDStrainEnergy(PotentialEnergy):
 
 
         #inverse
-        denom = 1 / (local_edge[0] * local_edge[3] - local_edge[2] * local_edge[1])
+        denom = 1.0 / (local_edge[0] * local_edge[3] - local_edge[2] * local_edge[1])
         params = ti.Vector([stiffness, local_edge[3] * denom , -local_edge[1] * denom, -local_edge[2] * denom, local_edge[0] * denom, surface_area, singular_min, singular_max])
         
         container.add_one_constraint(
@@ -77,12 +77,13 @@ class PDStrainEnergy(PotentialEnergy):
                             [ab[2] * a + ac[2] * c, ab[2] * b + ac[2] * d, 0.0]
         ])
 
-        U, S, VT = ti.svd(X_f_X_g)
+        U, S, V = ti.svd(X_f_X_g)
 
         S[0, 0] = ti.math.clamp(S[0, 0], singular_min, singular_max)
         S[1, 1] = ti.math.clamp(S[1, 1], singular_min, singular_max)
+        S[2, 2] = 0.0
 
-        T = (U @ S @ VT) * stiffness * surface_area
+        T = (U @ S @ V.transpose()) * stiffness * surface_area
 
 
 
@@ -90,6 +91,9 @@ class PDStrainEnergy(PotentialEnergy):
             ti.atomic_add(out_rhs[a_idx][k], T[k, 0] * (a + c) + T[k, 1] * (b + d))
             ti.atomic_add(out_rhs[b_idx][k], T[k, 0] * (-a) + T[k, 1] * (-b))
             ti.atomic_add(out_rhs[c_idx][k], T[k, 0] * (-c) + T[k, 1] * (-d))
+
+
+            
 
 
     @ti.kernel
