@@ -93,37 +93,14 @@ class PDStrainEnergy(PotentialEnergy):
             ti.atomic_add(out_rhs[c_idx][k], T[k, 0] * (-c) + T[k, 1] * (-d))
 
 
-            
-
-
-    @ti.kernel
-    def _fill_builders(self,
-                        a_idx : int,
-                        b_idx : int,
-                        c_idx : int,
-                        a: ti.f32,
-                        b: ti.f32,
-                        c: ti.f32,
-                        d: ti.f32,
-                        S: ti.types.sparse_matrix_builder(),
-                        A: ti.types.sparse_matrix_builder()):
-
-        S[0, a_idx] += 1.0
-        S[1, b_idx] += 1.0
-        S[2, c_idx] += 1.0
-        A[0, 0] += a + c
-        A[0, 1] += -a
-        A[0, 2] += -c
-        A[1, 0] += b + d
-        A[1, 1] += -b
-        A[1, 2] += -d
-        
-
-    def compute_pd_lhs_mat_func(
-                                self, 
-                                constraint: ti.template,
-                                data: ISimulationData,):
-
+    @ti.func
+    def fill_pd_A_and_cols(self,
+                           constraint: ti.template(),
+                           vertex_adj_offsets: ti.template(),
+                           vertex_adj_indices: ti.template(),
+                           vertex_adj_cotan_weights: ti.template(),
+                           A_out: ti.template(),
+                           cols_out: ti.template()):
 
         a_idx = constraint.v_indices[0]
         b_idx = constraint.v_indices[1]
@@ -131,37 +108,22 @@ class PDStrainEnergy(PotentialEnergy):
 
         stiffness = constraint.params[0]
 
-        Xg_a = constraint.params[1]
-        Xg_b = constraint.params[3]
-        Xg_c = constraint.params[2]
-        Xg_d = constraint.params[4]
+        a = constraint.params[1]
+        b = constraint.params[3]
+        c = constraint.params[2]
+        d = constraint.params[4]
 
         surface_area = constraint.params[5]
 
+        cols_out[0] = a_idx
+        cols_out[1] = b_idx
+        cols_out[2] = c_idx
 
-        points_num = data.get_num_dofs()
+        A_out[0, 0] = a + c
+        A_out[0, 1] = -a
+        A_out[0, 2] = -c
+        A_out[1, 0] = b + d
+        A_out[1, 1] = -b
+        A_out[1, 2] = -d
 
-        # 在 kernel 中填充 S/A builders
-        S_builder = ti.linalg.SparseMatrixBuilder(3, points_num, max_num_triplets=3)
-        A_builder = ti.linalg.SparseMatrixBuilder(2, 3, max_num_triplets=6)
-        self._fill_builders(
-                            a_idx,
-                            b_idx,
-                            c_idx,
-                            Xg_a,
-                            Xg_b,
-                            Xg_c,
-                            Xg_d,
-                            S_builder,
-                            A_builder)
-
-        S = S_builder.build()
-        A = A_builder.build()
-
-        S_T = S.transpose()
-        A_T = A.transpose()
-
-        result = stiffness * surface_area * (S_T @ A_T @ A @ S)
-
-        return result
-
+        return 3, stiffness * surface_area

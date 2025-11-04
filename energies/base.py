@@ -1,4 +1,5 @@
 import abc
+from ast import Tuple
 from typing import Any, Dict, Optional, Type, TypeVar
 
 import taichi as ti
@@ -56,6 +57,18 @@ class IPotentialEnergy(abc.ABC):
         This should be implemented as a @ti.func.
         """
         pass
+    @ti.func
+    def compute_hessian_block_ij_func(self,
+                                      constraint: ti.template(),
+                                      q: ti.template(),
+                                      a: ti.i32,
+                                      b: ti.i32) -> ti.types.matrix(3, 3, ti.f32):
+        """
+        (@ti.func) 通用接口：返回“局部顶点 a,b 的 3×3 赫塞块”。
+        - a,b 为该约束的局部顶点索引（0..m-1），调用方保证 a,b 在活跃范围内。
+        - 默认返回零矩阵，子类覆盖。
+        """
+        return ti.Matrix.zero(ti.f32, 3, 3)
     def compute_constraint_gradient_func(self, constraint: ti.template(), q: ti.template()):
         """
         Computes the constraint value C and gradient nabla_C for a single constraint.
@@ -80,6 +93,29 @@ class IPotentialEnergy(abc.ABC):
         - q_predict: data.get_predicted_dofs()，长度为全局 DoF 数，元素为 vec3。
         - vertex_adj_*: 从 ISimulationData.get_vertex_adjacency() 获取的 CSR 邻接与与其对齐的 cotan 权重。
         - out_rhs: 右手边累加缓冲，推荐为 Struct.field({"x","y","z"})，能量内部对 out_rhs[...] 的 x/y/z 分量使用 atomic_add 原地累加。
+        """
+        pass
+
+
+    # --------------------------
+    # PD LHS：单函数装配接口（A 已乘权重，列映射由能量端提供）
+    # --------------------------
+    @ti.func
+    def fill_pd_A_and_cols(self,
+                           constraint: ti.template(),
+                           vertex_adj_offsets: ti.template(),
+                           vertex_adj_indices: ti.template(),
+                           vertex_adj_cotan_weights: ti.template(),
+                           A_out: ti.template(),   # R_CAP×C_CAP，未用行/列写 0
+                           cols_out: ti.template() # 长度 C_CAP，未用列写 -1
+                           ) -> Tuple(ti.i32, ti.f32):
+        """
+        (@ti.func) 由能量端填充“ A 矩阵”与“列到全局顶点的映射”。
+
+        约定：
+        - A_out 的形状为 R_CAP×C_CAP（容器侧固定的上限）；应将未使用的行清零。
+        - cols_out 的长度为 C_CAP；应将未使用的列位置写为 -1。
+        - 返回 used_cols（实际使用的列数），容器据此裁剪列循环 以及 stiffness
         """
         pass
 

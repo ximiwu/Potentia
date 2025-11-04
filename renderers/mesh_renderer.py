@@ -1,3 +1,4 @@
+from struct import unpack
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
@@ -28,15 +29,23 @@ class MeshRenderer(IRenderer):
         title: str = "Energy Minimization Framework",
         background_color: Tuple[float, float, float] = (0.1, 0.1, 0.1),
         vertex_radius: float = 0.01,
-        edge_width: float = 1.0
+        edge_width: float = 1.0,
+        fps_limit: int = 1000,
+        camera_pos: Tuple[float, float, float] = (0.0, 1.5, 3),
+        camera_lookat: Tuple[float, float, float] = (0.0, 1.0, 0),
+        camera_up : Tuple[float, float, float] = (0.0, 1.0, 0)
     ):
-        self.window = ti.ui.Window(title, (width, height), vsync=True)
+        self.window = ti.ui.Window(title, (width, height), vsync=True, fps_limit=fps_limit)
         self.canvas = self.window.get_canvas()
         self.scene = self.window.get_scene()
         self.camera = ti.ui.Camera()
-        self.camera.position(0.0, 1.5, 3)
-        self.camera.lookat(0.0, 1.0, 0)
-        self.camera.up(0.0, 1.0, 0)
+        self.camera.position(*camera_pos)
+        self.camera.lookat(*camera_lookat)
+        self.camera.up(*camera_up)
+
+        self._camera_pos = [camera_pos[0], camera_pos[1], camera_pos[2]]
+        self._camera_lookat = [camera_lookat[0], camera_lookat[1], camera_lookat[2]]
+        self._camera_up = [camera_up[0], camera_up[1], camera_up[2]]
 
         self._background_color = background_color
         self._vertex_radius = vertex_radius
@@ -112,6 +121,9 @@ class MeshRenderer(IRenderer):
         
         self.canvas.set_background_color(self._background_color)
         self.canvas.scene(self.scene)
+        # present() will be called by the world after recording
+
+    def present(self) -> None:
         self.window.show()
 
     def is_window_running(self) -> bool:

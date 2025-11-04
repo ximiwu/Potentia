@@ -36,9 +36,12 @@ class ImplicitEulerIntegrator(IIntegrator):
                         dt: ti.f32):
         for i in positions:
             if inv_masses[i] > 0.0:
-                out_predicted_positions[i] = positions[i] + dt * velocities[i] + dt * dt * inv_masses[i] * forces[i]
+                result = positions[i] + dt * velocities[i] + dt * dt * inv_masses[i] * forces[i]
+                out_predicted_positions[i] = result
+                # out_predicted_positions_copy[i] = result
             else:
                 out_predicted_positions[i] = positions[i]
+                # out_predicted_positions_copy[i] = positions[i]
     
     def update_state(self, data: ISimulationData, dt: float) -> None:
         self._update_state_kernel(data.get_velocities(), data.get_dofs(), data.get_predicted_dofs(), dt)

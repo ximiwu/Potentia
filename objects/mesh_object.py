@@ -7,8 +7,10 @@ from taichi.math import vec3
 from data.base import ISimulationData
 from energies.global_energy_container import GlobalEnergyContainer
 from energies.distance_energy import DistanceEnergy
+from energies.pd_spring_energy import PDSpringEnergy
 from energies.pd_bending_energy import PDBendingEnergy
 from energies.pd_strain_energy import PDStrainEnergy
+
 from mesh.base import IEdgeDataProvider, IMesh
 from mesh.transforms import rotate_positions, scale_positions
 from .base import IMeshObject
@@ -49,6 +51,7 @@ class MeshObject(IMeshObject):
 
         # Cache DistanceEnergy singleton for use inside Taichi kernels via ti.static
         self._distance_energy = DistanceEnergy.get_instance()
+        self._pd_spring_energy = PDSpringEnergy.get_instance()
         self._pd_bending_energy = PDBendingEnergy.get_instance()
         self._pd_strain_energy = PDStrainEnergy.get_instance()
         self._energy_container = GlobalEnergyContainer.get_instance()
@@ -232,9 +235,9 @@ class MeshObject(IMeshObject):
         global_idx = self._data_offset + local_index
 
         if mass == -1.0:
-            # Pinned vertex per spec: inv_mass = 0, mass = -1
+            # Pinned vertex per spec: inv_mass = 0
             inv_mass_val = 0.0
-            mass_val = 1e9
+            mass_val = 10
         else:
             if mass <= 0.0:
                 raise ValueError("mass must be positive, or -1 for pinned vertex")
@@ -319,6 +322,81 @@ class MeshObject(IMeshObject):
                 constraint_idx,
                 p1_idx_global,
                 p2_idx_global,
+                rest_dist,
+                stiffness
+            )
+
+    def add_pd_spring_energy(self, stiffness: float):
+        """
+        Factory method to create and add PD edge spring energy
+        to the global DistanceEnergy singleton.
+
+        This method requires the associated mesh to provide edge connectivity data.
+
+        Args:
+            stiffness (float): The stiffness parameter for this batch of constraints.
+        """
+        # --- Type and Capability Checking ---
+        if not hasattr(self._mesh, 'get_edge_indices'):
+            raise AttributeError("The mesh does not provide edge data (IEdgeDataProvider). Cannot create distance energy.")
+
+        # --- Constraint Preparation ---
+        edge_indices = self._mesh.get_edge_indices()
+        assert edge_indices.shape[0] % 2 == 0
+        num_edges = edge_indices.shape[0] // 2
+        if num_edges == 0:
+            return
+
+        start_idx = self._energy_container.reserve_constraints(num_edges)
+
+        self._add_pd_spring_constraints_kernel(
+            self._data.get_dofs(),
+            edge_indices,
+            self._data_offset,
+            stiffness,
+            start_idx,
+            self._pd_spring_energy,
+            self._energy_container,
+            num_edges,
+
+        )
+
+
+    @ti.kernel
+    def _add_pd_spring_constraints_kernel(
+        self,
+        dofs: ti.template(),
+        mesh_edge_indices: ti.template(),
+        data_offset: ti.i32,
+        stiffness: ti.f32,
+        start_idx: ti.i32,
+        distance_energy: ti.template(),
+        energy_container: ti.template(),
+        num_edges: ti.i32
+    ):
+        """
+        Taichi kernel to compute rest lengths from the current deformed shape and
+        add distance constraints directly to the global energy container.
+        """
+        for i in range(num_edges):
+            idx1_local = mesh_edge_indices[2 * i + 0]
+            idx2_local = mesh_edge_indices[2 * i + 1]
+
+            p1_idx_global = idx1_local + data_offset
+            p2_idx_global = idx2_local + data_offset
+
+            v_indices = ti.Vector([p1_idx_global, p2_idx_global])
+
+            # Calculate rest distance from the CURRENT positions in the global dofs array
+            p1_current = dofs[p1_idx_global]
+            p2_current = dofs[p2_idx_global]
+            rest_dist = (p1_current - p2_current).norm()
+            
+            constraint_idx = start_idx + i
+            distance_energy.add_one_constraint_func(
+                energy_container,
+                constraint_idx,
+                v_indices,
                 rest_dist,
                 stiffness
             )

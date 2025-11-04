@@ -3,10 +3,12 @@ import math
 import time
 
 import taichi as ti
+import tkinter as tk
 
 from controller.base import IInputHandler
 from renderers.base import IRenderer
 from world.base import ISimulationWorld
+from recorders.base import RecordingMode
 
 
 class FPInputHandler(IInputHandler):
@@ -32,6 +34,14 @@ class FPInputHandler(IInputHandler):
         self._pitch: Optional[float] = None
 
         self._space_was_pressed: bool = False
+
+        # 外部控制面板（Tkinter）相关句柄
+        self._tk_root: Optional[tk.Tk] = None
+        self._tk_state_label: Optional[tk.Label] = None
+        self._tk_pos_label: Optional[tk.Label] = None
+        self._tk_look_label: Optional[tk.Label] = None
+        self._tk_yaw_label: Optional[tk.Label] = None
+        self._tk_mode_var: Optional[tk.StringVar] = None
 
     def handle_inputs(self, world: ISimulationWorld, renderer: IRenderer, dt: float) -> None:
         # 可用键位（字母键使用字符，遵循 GGUI/ImGui 键位规范）
@@ -157,14 +167,30 @@ class FPInputHandler(IInputHandler):
             elif self._pitch < -pitch_limit:
                 self._pitch = -pitch_limit
 
-        # 由 yaw/pitch 生成新的前向，并更新 lookat
-        cos_pitch = math.cos(self._pitch)
-        front_x = math.sin(self._yaw) * cos_pitch
-        front_y = math.sin(self._pitch)
-        front_z = math.cos(self._yaw) * cos_pitch
-        renderer._camera_lookat[0] = renderer._camera_pos[0] + front_x
-        renderer._camera_lookat[1] = renderer._camera_pos[1] + front_y
-        renderer._camera_lookat[2] = renderer._camera_pos[2] + front_z
+        # # 由 yaw/pitch 生成新的前向，并更新 lookat
+        # cos_pitch = math.cos(self._pitch)
+        # front_x = math.sin(self._yaw) * cos_pitch
+        # front_y = math.sin(self._pitch)
+        # front_z = math.cos(self._yaw) * cos_pitch
+        # renderer._camera_lookat[0] = renderer._camera_pos[0] + front_x
+        # renderer._camera_lookat[1] = renderer._camera_pos[1] + front_y
+        # renderer._camera_lookat[2] = renderer._camera_pos[2] + front_z
+
+        # 仅在旋转时更新 lookat，并保留原始距离
+        if (self._hold_mouse_button is None) or window.is_pressed(self._hold_mouse_button):
+            cos_pitch = math.cos(self._pitch)
+            front_x = math.sin(self._yaw) * cos_pitch
+            front_y = math.sin(self._pitch)
+            front_z = math.cos(self._yaw) * cos_pitch
+            ox = renderer._camera_lookat[0] - renderer._camera_pos[0]
+            oy = renderer._camera_lookat[1] - renderer._camera_pos[1]
+            oz = renderer._camera_lookat[2] - renderer._camera_pos[2]
+            orig_len = (ox*ox + oy*oy + oz*oz) ** 0.5
+            if orig_len < 1e-6:
+                orig_len = 1.0
+            renderer._camera_lookat[0] = renderer._camera_pos[0] + front_x * orig_len
+            renderer._camera_lookat[1] = renderer._camera_pos[1] + front_y * orig_len
+            renderer._camera_lookat[2] = renderer._camera_pos[2] + front_z * orig_len
 
         # 写回 Taichi Camera
         camera.position(renderer._camera_pos[0], renderer._camera_pos[1], renderer._camera_pos[2])
@@ -179,18 +205,155 @@ class FPInputHandler(IInputHandler):
         self._paused = paused
 
     def draw_ui(self, world: ISimulationWorld, renderer: IRenderer) -> None:
-        # 通过渲染器窗口的 GUI 提供最小 UI：暂停/继续、重置按钮
-        # window = getattr(renderer, 'window', None)
-        # if window is None:
-        #     return
-        # gui = window.get_gui()
-        # with gui.sub_window("Control", x=10, y=10, width=220, height=80):
-        #     if gui.button("Pause/Resume (Space)"):
-        #         print("test")
-        #         self._paused = not self._paused
-        #     if gui.button("Reset"):
-        #         # 若世界实现了 reset 接口，可调用；否则忽略
-        #         if hasattr(world, 'reset') and callable(getattr(world, 'reset')):
-        #             world.reset()
-        pass
+        # 使用 Tkinter 作为独立控制面板（避免 GGUI 多窗口的 ImGui 后端冲突）
+        if (self._tk_root is None) or (not self._tk_root.winfo_exists()):
+            root = tk.Tk()
+            root.title("Control Panel")
+            # 尝试把窗口放在渲染窗口右侧（无法获取确切位置时使用保守偏移）
+            try:
+                x_offset = 1400
+                y_offset = 80
+                w = 1280
+                if hasattr(renderer, 'window') and hasattr(renderer.window, 'get_window_shape'):
+                    try:
+                        w_shape = renderer.window.get_window_shape()
+                        if isinstance(w_shape, (tuple, list)) and len(w_shape) >= 2:
+                            w = int(w_shape[0])
+                    except Exception:
+                        pass
+                x_offset = w + 220
+                root.geometry(f"360x440+{x_offset}+{y_offset}")
+            except Exception:
+                try:
+                    root.geometry("360x440+1500+80")
+                except Exception:
+                    pass
+
+            # 关闭时仅销毁引用，允许后续自动重建
+            def _on_close():
+                try:
+                    root.destroy()
+                finally:
+                    self._tk_root = None
+
+            root.protocol("WM_DELETE_WINDOW", _on_close)
+
+            # Simulation
+            sim_frame = tk.LabelFrame(root, text="Simulation")
+            sim_frame.pack(fill="x", padx=8, pady=8)
+            self._tk_state_label = tk.Label(sim_frame, text="State: Unknown")
+            self._tk_state_label.pack(anchor="w", padx=8, pady=4)
+
+            def _toggle_pause():
+                self._paused = not self._paused
+
+            tk.Button(sim_frame, text="Pause/Resume (Space)", command=_toggle_pause).pack(anchor="w", padx=8, pady=4)
+
+            # Camera
+            cam_frame = tk.LabelFrame(root, text="Camera")
+            cam_frame.pack(fill="x", padx=8, pady=8)
+            self._tk_pos_label = tk.Label(cam_frame, text="pos: N/A")
+            self._tk_pos_label.pack(anchor="w", padx=8, pady=4)
+            self._tk_look_label = tk.Label(cam_frame, text="lookat: N/A")
+            self._tk_look_label.pack(anchor="w", padx=8, pady=4)
+            self._tk_yaw_label = tk.Label(cam_frame, text="yaw/pitch: N/A")
+            self._tk_yaw_label.pack(anchor="w", padx=8, pady=4)
+
+            # Recorder
+            rec_frame = tk.LabelFrame(root, text="Recorder")
+            rec_frame.pack(fill="x", padx=8, pady=8)
+
+            self._tk_mode_var = tk.StringVar(value="DISABLED")
+
+            def _apply_mode():
+                recorder_local = None
+                if hasattr(world, 'get_recorder') and callable(getattr(world, 'get_recorder')):
+                    recorder_local = world.get_recorder()
+                if recorder_local is None:
+                    return
+                name = self._tk_mode_var.get()
+                try:
+                    recorder_local.set_mode(RecordingMode[name])
+                except Exception:
+                    pass
+
+            modes = ["DISABLED", "RUNNING_ONLY", "ALWAYS"]
+            for m in modes:
+                tk.Radiobutton(rec_frame, text=m, variable=self._tk_mode_var, value=m, command=_apply_mode).pack(anchor="w", padx=8)
+
+            def _start_rec():
+                recorder_local = None
+                if hasattr(world, 'get_recorder') and callable(getattr(world, 'get_recorder')):
+                    recorder_local = world.get_recorder()
+                if recorder_local is None:
+                    return
+                try:
+                    recorder_local.start()
+                except Exception:
+                    pass
+
+            def _stop_rec():
+                recorder_local = None
+                if hasattr(world, 'get_recorder') and callable(getattr(world, 'get_recorder')):
+                    recorder_local = world.get_recorder()
+                if recorder_local is None:
+                    return
+                try:
+                    recorder_local.stop()
+                except Exception:
+                    pass
+
+            btns = tk.Frame(rec_frame)
+            btns.pack(fill="x", padx=8, pady=4)
+            tk.Button(btns, text="Start Recording", command=_start_rec).pack(side="left")
+            tk.Button(btns, text="Stop Recording", command=_stop_rec).pack(side="left", padx=8)
+
+            self._tk_root = root
+
+        # 每帧更新显示文本
+        if self._tk_root is not None and self._tk_root.winfo_exists():
+            if self._tk_state_label is not None:
+                self._tk_state_label.config(text=f"State: {'Paused' if self._paused else 'Running'}")
+
+            pos = getattr(renderer, '_camera_pos', None)
+            look = getattr(renderer, '_camera_lookat', None)
+            if self._tk_pos_label is not None:
+                if pos is not None and len(pos) == 3:
+                    self._tk_pos_label.config(text=f"pos: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+                else:
+                    self._tk_pos_label.config(text="pos: N/A")
+            if self._tk_look_label is not None:
+                if look is not None and len(look) == 3:
+                    self._tk_look_label.config(text=f"lookat: ({look[0]:.3f}, {look[1]:.3f}, {look[2]:.3f})")
+                else:
+                    self._tk_look_label.config(text="lookat: N/A")
+
+            if self._tk_yaw_label is not None:
+                if self._yaw is not None and self._pitch is not None:
+                    yaw_deg = self._yaw * 180.0 / math.pi
+                    pitch_deg = self._pitch * 180.0 / math.pi
+                    self._tk_yaw_label.config(text=f"yaw: {yaw_deg:.1f}°, pitch: {pitch_deg:.1f}°")
+                elif pos is not None and look is not None:
+                    fx = look[0] - pos[0]
+                    fy = look[1] - pos[1]
+                    fz = look[2] - pos[2]
+                    fl = (fx * fx + fy * fy + fz * fz) ** 0.5
+                    if fl > 1e-6:
+                        fx /= fl
+                        fy /= fl
+                        fz /= fl
+                        yaw = math.atan2(fx, fz)
+                        pitch = math.asin(max(-1.0, min(1.0, fy)))
+                        self._tk_yaw_label.config(text=f"yaw: {yaw * 180.0 / math.pi:.1f}°, pitch: {pitch * 180.0 / math.pi:.1f}°")
+                    else:
+                        self._tk_yaw_label.config(text="yaw/pitch: N/A")
+                else:
+                    self._tk_yaw_label.config(text="yaw/pitch: N/A")
+
+            try:
+                self._tk_root.update_idletasks()
+                self._tk_root.update()
+            except Exception:
+                # 若用户强制关闭窗口，容错为下次重建
+                self._tk_root = None
 

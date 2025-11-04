@@ -6,7 +6,6 @@ import taichi as ti
 from data.base import ISimulationData
 from objects.base import ISimulationObject
 
-from world.base import ISimulationWorld
 
 
 @ti.data_oriented
@@ -19,10 +18,11 @@ class IRenderer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def is_window_running(self) -> bool:
-        """Returns True to continue the simulation loop."""
+    def present(self) -> None:
+        """Presents the frame (swap buffers)."""
         pass
 
-    def setup_gui(self, world: ISimulationWorld):
-        """(Optional) Sets up GUI controls."""
+    @abc.abstractmethod
+    def is_window_running(self) -> bool:
+        """Returns True to continue the simulation loop."""
         pass

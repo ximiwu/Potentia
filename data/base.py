@@ -34,6 +34,16 @@ class ISimulationData(abc.ABC):
         pass
 
     @abc.abstractmethod
+    def get_record_dofs(self) -> ti.Field:
+        pass
+
+    @abc.abstractmethod
+    def record_predicted_dofs(self):
+        pass
+
+    
+
+    @abc.abstractmethod
     def get_num_dofs(self) -> int:
         """Returns the total number of degrees of freedom."""
         pass

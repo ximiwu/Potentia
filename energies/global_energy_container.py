@@ -11,6 +11,10 @@ from .base import IGlobalEnergyContainer, IPotentialEnergy
 class GlobalEnergyContainer(IGlobalEnergyContainer):
     _instance = None
 
+    # 固定容量上限：PD 中， A 的行、列上限（列与 v_indices 无关，支持能量端自定义列到全局顶点的映射）
+    PD_A_ROW_MAX: int = 8
+    PD_A_COL_MAX: int = 16
+
     @classmethod
     def get_instance(cls):
         """
@@ -48,10 +52,13 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
         self.num_static_constraints = ti.field(dtype=ti.i32, shape=())
         
         # self.root = ti.root.dynamic(ti.i, self.max_constraints, chunk_size=1024)
-        self.root = ti.root.dense(ti.i, 100000)
+        self.root = ti.root.dense(ti.i, self.max_constraints)
         self.root.place(self.constraints)
 
         self.registered_energies: Dict[int, IPotentialEnergy] = {}
+
+        self._energy_acc = ti.field(dtype=ti.f32, shape=())
+        self._loss_acc = ti.field(dtype=ti.f32, shape=())
         
         # Set the class instance variable
         GlobalEnergyContainer._instance = self
@@ -120,11 +127,31 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
                     self.registered_energies[type_id].compute_gradient_func(constraint, q, out_grad)
 
     def compute_energy(self, data: ISimulationData) -> ti.f32:
-        total_energy = ti.field(dtype=ti.f32, shape=())
-        total_energy[None] = 0.0
+        self._energy_acc[None] = 0.0
         q = data.get_predicted_dofs()
-        self._compute_energy_kernel(q, total_energy)
-        return total_energy[None]
+        self._compute_energy_kernel(q, self._energy_acc)
+        return self._energy_acc[None]
+
+    def compute_loss(self, data: ISimulationData, x: ti.template(), y:ti.template(), dt: float) -> ti.f32:
+        """
+        g(x) = 1/2 (x - y)^T M (x - y) + dt^2 E(x)
+        - x: predicted DoFs
+        - y: initial predicted DoFs
+        - M: diagonal from masses
+        - E(x): total energy computed via compute_energy
+        """
+        self._loss_acc[None] = 0.0
+        masses = data.get_masses()
+        n = data.get_num_dofs()
+
+        # accumulate 1/2 (x - y)^T M (x - y)
+        self._accumulate_mass_quadratic_term(x, y, masses, n, self._loss_acc)
+
+        # add dt^2 * E(x)
+        self._energy_acc[None] = 0.0
+        self._compute_energy_kernel(x, self._energy_acc)
+        self._loss_acc[None] = self._loss_acc[None] + (dt * dt) * self._energy_acc[None]
+        return self._loss_acc[None]
 
     @ti.kernel
     def _compute_energy_kernel(self, q: ti.template(), total_energy: ti.template()):
@@ -137,11 +164,46 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
                     energy = self.registered_energies[type_id].compute_energy_func(constraint, q)
             ti.atomic_add(total_energy[None], energy)
 
+    @ti.kernel
+    def _accumulate_mass_quadratic_term(self,
+                                        x: ti.template(),
+                                        y: ti.template(),
+                                        masses: ti.template(),
+                                        n: ti.i32,
+                                        out_acc: ti.template()):
+        for i in range(n):
+            m = masses[i]
+            if m > 0.0:
+                d = x[i] - y[i]
+                ti.atomic_add(out_acc[None], 0.5 * m * d.dot(d))
+
     def compute_hessian(self, data: ISimulationData, out_hessian_builder: Any):
-        # This is a placeholder for the hessian computation.
-        # A concrete kernel would be needed here.
-        print("Warning: GlobalEnergyContainer.compute_hessian is not implemented.")
-        pass
+        q = data.get_predicted_dofs()
+        self._compute_hessian_kernel(q, out_hessian_builder)
+
+    @ti.kernel
+    def _compute_hessian_kernel(self,
+                                q: ti.template(),
+                                out_builder: ti.types.sparse_matrix_builder()):
+        for idx in range(self.num_active_constraints[None]):
+            c = self.constraints[idx]
+            # 统计活跃顶点数 m（v_indices >= 0）
+            m = 0
+            for k in ti.static(range(self.v_indices_size)):
+                if c.v_indices[k] >= 0:
+                    m += 1
+            for type_id in ti.static(list(self.registered_energies.keys())):
+                if c.constraint_type == type_id:
+                    for a in range(m):
+                        ia = c.v_indices[a]
+                        base_i = 3 * ia
+                        for b in range(m):
+                            ib = c.v_indices[b]
+                            base_j = 3 * ib
+                            H = self.registered_energies[type_id].compute_hessian_block_ij_func(c, q, a, b)
+                            for u in ti.static(range(3)):
+                                for v in ti.static(range(3)):
+                                    out_builder[base_i + u, base_j + v] += H[u, v]
 
     def compute_pd_rhs_init_vec(self, data: ISimulationData, out_vec: ti.template(), dt: float):
         """
@@ -234,39 +296,66 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
                            dt: float) -> ti.linalg.SparseMatrix:
         """
         装配并返回 PD 的 LHS（N×N 标量稀疏矩阵）。
-        - 写入质量对角 M/dt^2（Python 侧构造）
-        - 遍历所有已注册能量，若其实现了 compute_pd_lhs_mat_func(data)，则将其返回稀疏矩阵相加
+        - 单一 SparseMatrixBuilder：写入质量对角 M/dt^2，并在一个 kernel 中并行装配所有约束的 S^T A^T A S 贡献
         """
 
         n = data.get_num_dofs()
         masses = data.get_masses()
 
-        # 1) 质量对角（M/dt^2） —— 在 kernel 内填充 builder
+        # 估计 triplets：质量对角 n + 每个约束至多 PD_A_COL_MAX^2 个条目
+        num_constraints = int(self.num_active_constraints[None])
+        max_tris = n + num_constraints * (GlobalEnergyContainer.PD_A_COL_MAX * GlobalEnergyContainer.PD_A_COL_MAX)
+
+        builder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=max_tris)
+
+        # 写入质量对角（M/dt^2）
         inv_dt2 = 1.0 / (dt * dt)
-        mass_builder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=n)
-        self._fill_mass_lhs(masses, n, inv_dt2, mass_builder)
-        lhs = mass_builder.build()
+        self._fill_mass_lhs(masses, n, inv_dt2, builder)
 
-        # 2) 遍历每个约束，按类型分发到对应能量，累加“单约束”贡献矩阵
-        num_constraints = self.num_active_constraints[None]
-        for i in range(num_constraints):
-            c = self.constraints[i]
-            type_id = int(c.constraint_type)
-            energy = self.registered_energies.get(type_id, None)
-            if energy is None:
-                continue
-            try:
-                contrib = energy.compute_pd_lhs_mat_func(c, data)
-            except NotImplementedError:
-                contrib = None
-            except Exception as e:
-                print(f"Warning: {energy.__class__.__name__}.compute_pd_lhs_mat_func 约束 {i} 失败：{e}")
-                contrib = None
+        # 从 ISimulationData 获取 CSR 顶点邻接与与其对齐的 cotan 权重
+        offsets, info = data.get_vertex_adjacency()
+        self._accumulate_pd_lhs_kernel(
+            offsets,
+            info.vertex_adj_indices,
+            info.vertex_adj_cotan_weights,
+            builder,
+        )
 
-            if contrib is not None:
-                lhs = lhs + contrib
+        return builder.build()
 
-        return lhs
+    @ti.kernel
+    def _accumulate_pd_lhs_kernel(self,
+                                  vertex_adj_offsets: ti.template(),
+                                  vertex_adj_indices: ti.template(),
+                                  vertex_adj_cotan_weights: ti.template(),
+                                  out_builder: ti.types.sparse_matrix_builder()):
+        for idx in range(self.num_active_constraints[None]):
+            c = self.constraints[idx]
+
+            for type_id in ti.static(list(self.registered_energies.keys())):
+                if c.constraint_type == type_id:
+                    # 局部缓冲：A_buf[PD_A_ROW_MAX, PD_A_COL_MAX]，cols_buf[PD_A_COL_MAX]
+                    A_buf = ti.Matrix.zero(ti.f32, GlobalEnergyContainer.PD_A_ROW_MAX, GlobalEnergyContainer.PD_A_COL_MAX)
+                    cols_buf = ti.Vector.zero(ti.i32, GlobalEnergyContainer.PD_A_COL_MAX)
+
+                    used_cols, stiffness = self.registered_energies[type_id].fill_pd_A_and_cols(
+                        c,
+                        vertex_adj_offsets,
+                        vertex_adj_indices,
+                        vertex_adj_cotan_weights,
+                        A_buf,
+                        cols_buf,
+                    )
+
+                    # K_local = A^T A
+                    for a in range(used_cols):
+                        ia = cols_buf[a]
+                        for b in range(used_cols):
+                            ib = cols_buf[b]
+                            val = 0.0
+                            for r in range(GlobalEnergyContainer.PD_A_ROW_MAX):
+                                val += A_buf[r, a] * A_buf[r, b]
+                            out_builder[ia, ib] += val * stiffness
 
 
 

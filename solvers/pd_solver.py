@@ -18,7 +18,7 @@ class PDSolver(ISolver):
     - 固定点（inv_mass == 0 / mass == -1）跳过写回
     """
 
-    def __init__(self, data: "ISimulationData", iterations: int = 3, ordering: str = "AMD") -> None:
+    def __init__(self, data: ISimulationData, iterations: int = 3, ordering: str = "AMD") -> None:
         self.iterations: int = int(iterations)
         self.ordering: str = ordering
 
@@ -33,7 +33,7 @@ class PDSolver(ISolver):
         self._rhs_init = ti.Vector.field(3, dtype=ti.f32, shape=self._capacity)
         self._rhs = ti.Vector.field(3, dtype=ti.f32, shape=self._capacity)
 
-    def build_lhs(self, data: "ISimulationData", dt: float) -> None:
+    def build_lhs(self, data: ISimulationData, dt: float) -> None:
         """
         构建并分解 LHS：
         - 由 GlobalEnergyContainer 装配 LHS（N×N 标量稀疏矩阵）
@@ -53,13 +53,13 @@ class PDSolver(ISolver):
         if self._capacity < n:
             raise RuntimeError(f"PDSolver: capacity {self._capacity} < required n {n} in build_lhs().")
 
-    def initialize_rhs_init(self, data: "ISimulationData", dt: float) -> None:
+    def initialize_rhs_init(self, data: ISimulationData, dt: float) -> None:
         """
         初始化每帧不变的 RHS 初值
         """
         self._container.compute_pd_rhs_init_vec(data, self._rhs_init, dt)
 
-    def solve(self, data: "ISimulationData", dt: float) -> None:
+    def solve(self, data: ISimulationData, dt: float) -> None:
         if self._solver is None or self._n is None:
             raise RuntimeError("PDSolver: 尚未构建/分解 LHS。请先调用 rebuild_lhs(data, dt)。")
 

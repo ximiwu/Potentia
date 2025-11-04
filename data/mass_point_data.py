@@ -25,6 +25,7 @@ class MassPointData(ISimulationData):
         self.particle_data = ti.Struct.field({
             "positions": ti.math.vec3,
             "predicted_positions": ti.math.vec3,
+            "record_positions": ti.math.vec3,
             "velocities": ti.math.vec3,
             "masses": ti.f32,
             "inv_masses": ti.f32
@@ -61,6 +62,19 @@ class MassPointData(ISimulationData):
             return self.particle_data.predicted_positions
         else:
             return self.particle_data.positions
+
+    def get_record_dofs(self) -> ti.Field:
+        return self.particle_data.record_positions
+
+    def record_predicted_dofs(self):
+        self._record_dofs_kernel(self.get_predicted_dofs(), self.get_record_dofs(), self.get_max_num_dofs())
+
+    @ti.kernel
+    def _record_dofs_kernel(self, source: ti.template(), dest: ti.template(), dim: int):
+        for i in range(dim):
+            dest[i] = source[i]
+
+
 
     def get_num_dofs(self) -> int:
         return self._current_num_dofs
@@ -101,3 +115,5 @@ class MassPointData(ISimulationData):
     def reset_vertex_adjacency(self) -> None:
         """Resets the global CSR write pointer to zero (offsets are not cleared)."""
         self.vertex_adj_next[None] = 0
+
+
