@@ -57,3 +57,13 @@ class ImplicitEulerIntegrator(IIntegrator):
                              dt: ti.f32):
         for i in velocities:
             velocities[i] = (predicted_positions[i] - positions[i]) / dt
+
+
+    def clear_state(self, data: ISimulationData) -> None:
+        self._clear_state_kernel(data.get_velocities())
+
+    @ti.kernel
+    def _clear_state_kernel(self,
+                             velocities: ti.template()):
+        for i in velocities:
+            velocities[i] = 0.0

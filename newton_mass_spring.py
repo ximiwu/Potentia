@@ -123,11 +123,14 @@ world.add_object(obj1)
 # obj1.set_mass(99, -1.0)
 
 
-sim_data.get_dofs()[0] = ti.Vector([0, -1, -1], dt=ti.f32)
-sim_data.get_dofs()[1] = ti.Vector([0, 1, -1], dt=ti.f32)
-sim_data.get_dofs()[2] = ti.Vector([0, -1, 1], dt=ti.f32)
-sim_data.get_dofs()[3] = ti.Vector([0, 1, 1], dt=ti.f32)
-
+# sim_data.get_dofs()[0] = ti.Vector([0, -1, -1], dt=ti.f32)
+# sim_data.get_dofs()[1] = ti.Vector([0, 1, -1], dt=ti.f32)
+# sim_data.get_dofs()[2] = ti.Vector([0, -1, 1], dt=ti.f32)
+# sim_data.get_dofs()[3] = ti.Vector([0, 1, 1], dt=ti.f32)
+sim_data.get_dofs()[0] = ti.Vector([0, -10, -10], dt=ti.f32)
+sim_data.get_dofs()[1] = ti.Vector([0, 10, -10], dt=ti.f32)
+sim_data.get_dofs()[2] = ti.Vector([0, -10, 10], dt=ti.f32)
+sim_data.get_dofs()[3] = ti.Vector([0, 10, 10], dt=ti.f32)
 
 
 # 时间步长

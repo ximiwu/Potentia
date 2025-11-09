@@ -99,6 +99,7 @@ class SimulationWorld(ISimulationWorld):
         self.solver.solve(self.data, dt)
 
         self.integrator.update_state(self.data, dt)
+        # self.integrator.clear_state(self.data)
         
         # 可选能力：在求解完成后、更新状态之前持久化 DoF/速度 与 loss
         if self.recorder is not None and hasattr(self.recorder, "on_solve_end"):

@@ -124,7 +124,7 @@ world = SimulationWorld(data=sim_data,
 # 3. 创建并添加仿真对象
 
 
-cloth_mesh = TriMesh.from_obj("models/cloth10x10.obj", rotation=(0, 0, 0))
+cloth_mesh = TriMesh.from_obj("models/cloth2x2.obj", rotation=(0, 0, 0))
 
 cloth_mesh.materialize()
 
@@ -134,15 +134,19 @@ obj1.add_pd_spring_energy(1200)
 
 world.add_object(obj1)
 
-const_fr = ConstantForce(obj=obj1, local_indices=[9,8,7,6,5,4,3,2,1,0], force=ti.math.vec3(0.0, 0.0, -10.0))
-const_fl = ConstantForce(obj=obj1, local_indices=[99,98,97,96,95,94,93,92,91,90], force=ti.math.vec3(0.0, 0.0, 10.0))
-world.add_force(const_fr)
-world.add_force(const_fl)
+# const_fr = ConstantForce(obj=obj1, local_indices=[9,8,7,6,5,4,3,2,1,0], force=ti.math.vec3(0.0, 0.0, -10.0))
+# const_fl = ConstantForce(obj=obj1, local_indices=[99,98,97,96,95,94,93,92,91,90], force=ti.math.vec3(0.0, 0.0, 10.0))
+# world.add_force(const_fr)
+# world.add_force(const_fl)
 
 # sim_data.get_dofs()[0] = ti.Vector([0, -1, -1], dt=ti.f32)
 # sim_data.get_dofs()[1] = ti.Vector([0, 1, -1], dt=ti.f32)
 # sim_data.get_dofs()[2] = ti.Vector([0, -1, 1], dt=ti.f32)
 # sim_data.get_dofs()[3] = ti.Vector([0, 1, 1], dt=ti.f32)
+sim_data.get_dofs()[0] = ti.Vector([0, -10, -10], dt=ti.f32)
+sim_data.get_dofs()[1] = ti.Vector([0, 10, -10], dt=ti.f32)
+sim_data.get_dofs()[2] = ti.Vector([0, -10, 10], dt=ti.f32)
+sim_data.get_dofs()[3] = ti.Vector([0, 10, 10], dt=ti.f32)
 
 
 

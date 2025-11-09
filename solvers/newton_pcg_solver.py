@@ -18,7 +18,7 @@ class NewtonPCGSolver(ISolver):
         self._container = GlobalEnergyContainer.get_instance()
 
         capacity = int(data.get_max_num_dofs())
-        self._y = ti.Vector.field(3, dtype=ti.f32, shape=capacity)
+        self._y = data.get_record_dofs()
         self._grad_e = ti.Vector.field(3, dtype=ti.f32, shape=capacity)
         self._grad_total = ti.Vector.field(3, dtype=ti.f32, shape=capacity)
 
@@ -31,18 +31,12 @@ class NewtonPCGSolver(ISolver):
             return
 
         h2 = dt * dt
-
-        # 固定 “惯性参考” y = s_n
-        self._copy_vec3(data.get_predicted_dofs(), n, self._y)
-
-        # 预构建一些缓冲
         dim = 3 * n
         num_constraints = int(self._container.get_num_constraints())
 
-        # 牛顿迭代
         for iter_idx in range(self.max_iterations):
 
-            # print(f"Newton_iter{iter_idx}")
+            print(f"Newton_iter{iter_idx}")
 
             # 1) 梯度：G = M(x-y) + h^2 E'(x)
             self._container.compute_gradient(data, self._grad_e)
@@ -59,20 +53,27 @@ class NewtonPCGSolver(ISolver):
             max_triplets = max(1, num_constraints * 9 * max_blocks_per_c)
             he_builder = ti.linalg.SparseMatrixBuilder(dim, dim, max_num_triplets=max_triplets)
             self._container.compute_hessian(data, he_builder)
-            He = he_builder.build()
+            He = he_builder.build()  # E''(x)
+            # 构建质量矩阵 M 的稀疏对角
+            mass_builder = ti.linalg.SparseMatrixBuilder(dim, dim, max_num_triplets=dim)
+            self._fill_mass_diag(data.get_masses(), n, mass_builder)
+            M = mass_builder.build()
+            # 显式组合：H = M + h^2 E''(x)
+            H = M + h2 * He
 
             # 3) 方向：PCG 解 H Δ = -G
             b = ti.ndarray(dtype=ti.f32, shape=(dim,))
             self._flatten_vec3_to_scalars(self._grad_total, n, b)
             self._scale_array_(b, -1.0)  # b = -G
 
-            delta = self._solve_with_pcg(He, b, dim, data.get_masses(), n, h2)
+            delta = self._solve_with_pcg(H, b, dim, data.get_masses(), n)
 
             # 4) 线搜索（Armijo 回溯）
             g_old = self._objective(data, dt, self._y)
             gdotp = float(self._dot_grad_with_delta(self._grad_total, n, delta))
 
             if gdotp >= 0.0:
+                print("gdotp >= 0.0")
                 g_flat = ti.ndarray(dtype=ti.f32, shape=(dim,))
                 self._flatten_vec3_to_scalars(self._grad_total, n, g_flat)
                 diag_inv = ti.ndarray(dtype=ti.f32, shape=(dim,))
@@ -84,11 +85,12 @@ class NewtonPCGSolver(ISolver):
 
             alpha = 1.0
             accepted = False
-            # self._apply_step(data.get_predicted_dofs(), data.get_inv_masses(), n, delta, alpha)
+
             for _ls in range(12):
                 self._apply_step(data.get_predicted_dofs(), data.get_inv_masses(), n, delta, alpha)
                 g_new = self._objective(data, dt, self._y)
                 if g_new <= g_old + 1e-4 * alpha * gdotp:
+                # if g_new < g_old:
                     accepted = True
                     g_old = g_new
                     break
@@ -98,21 +100,17 @@ class NewtonPCGSolver(ISolver):
                 alpha *= 0.5
 
             if not accepted:
-                # 兜底：给一个极小步长，避免完全不更新
-                alpha = 2.0 ** -12
-                self._apply_step(data.get_predicted_dofs(), data.get_inv_masses(), n, delta, alpha)
+                # alpha = 2.0 ** -12
+                # self._apply_step(data.get_predicted_dofs(), data.get_inv_masses(), n, delta, alpha)
+                print("not accepted")
                 break
 
             # 步长很小也可提前结束
-            if float(self._l2_norm(delta) * alpha) < 1e-12:
-                break
+            # if float(self._l2_norm(delta) * alpha) < 1e-12:
+            #     break
 
     # ------------------------ kernels & helpers ------------------------
 
-    @ti.kernel
-    def _copy_vec3(self, src: ti.template(), n: ti.i32, dst: ti.template()):
-        for i in range(n):
-            dst[i] = src[i]
 
     @ti.kernel
     def _compute_inertial_grad(self,
@@ -189,45 +187,11 @@ class NewtonPCGSolver(ISolver):
             acc += v * v
         return ti.sqrt(acc)
 
-    def _solve_with_correction(self,
-                               H: ti.linalg.SparseMatrix,
-                               b: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                               dim: int) -> Optional[ti.types.ndarray]:
-        mu = 1e-6
-        diag_builder = ti.linalg.SparseMatrixBuilder(dim, dim, max_num_triplets=dim)
-        self._fill_diag(diag_builder, dim, mu)
-        H_mu = H + diag_builder.build()
 
-        solver = ti.linalg.SparseSolver(solver_type="LLT", ordering=self.ordering)
-        solver.analyze_pattern(H_mu)
-        solver.factorize(H_mu)
-        x = solver.solve(b)
-        return x
-
-
-    @ti.kernel
-    def _fill_diag(self, builder: ti.types.sparse_matrix_builder(), dim: ti.i32, mu: ti.f32):
-        for i in range(dim):
-            builder[i, i] += mu
 
     def _objective(self, data: ISimulationData, dt: float, y: ti.Field) -> float:
-        h2 = dt * dt
-        e = float(self._container.compute_energy(data))
-        return 0.5 * float(self._inertial_quadratic(data.get_predicted_dofs(), y, data.get_masses(), int(data.get_num_dofs()))) + h2 * e
+        return float(self._container.compute_loss(data, data.get_predicted_dofs(), y, dt))
 
-    @ti.kernel
-    def _inertial_quadratic(self,
-                            q: ti.template(),
-                            y: ti.template(),
-                            masses: ti.template(),
-                            n: ti.i32) -> ti.f32:
-        acc = 0.0
-        for i in range(n):
-            m = masses[i]
-            if m > 0.0:
-                d = q[i] - y[i]
-                acc += m * d.dot(d)
-        return acc
 
     @ti.kernel
     def _dot_grad_with_delta(self,
@@ -247,12 +211,11 @@ class NewtonPCGSolver(ISolver):
     # ------------------------ PCG helpers ------------------------
 
     def _solve_with_pcg(self,
-                        He: ti.linalg.SparseMatrix,
+                        H: ti.linalg.SparseMatrix,
                         b: ti.types.ndarray(dtype=ti.f32, ndim=1),
                         dim: int,
                         masses: ti.Field,
                         n: int,
-                        h2: float,
                         mu: float = 1e-6,
                         max_iter: Optional[int] = None,
                         rtol: float = 1e-6) -> ti.types.ndarray:
@@ -264,7 +227,7 @@ class NewtonPCGSolver(ISolver):
         r = ti.ndarray(dtype=ti.f32, shape=(dim,))
         p = ti.ndarray(dtype=ti.f32, shape=(dim,))
         z = ti.ndarray(dtype=ti.f32, shape=(dim,))
-        Hp = ti.ndarray(dtype=ti.f32, shape=(dim,))
+        Ap = ti.ndarray(dtype=ti.f32, shape=(dim,))
         diag_inv = ti.ndarray(dtype=ti.f32, shape=(dim,))
 
         # 预条件：Jacobi (diag(M)+mu)^{-1}
@@ -283,19 +246,19 @@ class NewtonPCGSolver(ISolver):
 
         # PCG 主循环
         for iter_idx in range(max_iter):
-            # print(f"PCG_iter{iter_idx}")
-            # Hp = H·p = h2*(He·p) + (M+mu I)·p
-            he_p = He @ p
-            self._combine_hessian_mv(he_p, p, masses, n, h2, mu, Hp)
+            print(f"PCG_iter{iter_idx}")
+            # Ap = (H + mu I)·p
+            Ap = H @ p
+            self._axpy_nd(Ap, mu, p)  # Ap += mu * p
 
-            denom = float(self._dot_nd(p, Hp))
+            denom = float(self._dot_nd(p, Ap))
             if abs(denom) < 1e-20:
                 break
 
             alpha = rr_old / denom
 
             self._axpy_nd(x, alpha, p)      # x += alpha p
-            self._axpy_nd(r, -alpha, Hp)    # r -= alpha Hp
+            self._axpy_nd(r, -alpha, Ap)    # r -= alpha Ap
 
             rel = float(math.sqrt(self._dot_nd(r, r))) / b_norm
             if rel < rtol:
@@ -327,20 +290,6 @@ class NewtonPCGSolver(ISolver):
             out_diag_inv[base + 1] = inv
             out_diag_inv[base + 2] = inv
 
-    @ti.kernel
-    def _combine_hessian_mv(self,
-                            he_p: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                            p: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                            masses: ti.template(),
-                            n: ti.i32,
-                            h2: ti.f32,
-                            mu: ti.f32,
-                            out_vec: ti.types.ndarray(dtype=ti.f32, ndim=1)):
-        for i in range(n):
-            base = 3 * i
-            m = masses[i]
-            for c in ti.static(range(3)):
-                out_vec[base + c] = h2 * he_p[base + c] + (m + mu) * p[base + c]
 
     @ti.kernel
     def _dot_nd(self,
