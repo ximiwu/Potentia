@@ -167,13 +167,13 @@ world.add_actuator(act1)
 dt = 1.0 / 30.0
 
 # 可选：在第一次 world.step 前从录制的会话恢复（需要用户自行保证对象添加顺序与数量一致）
-def set_init_frame(idx: int):
-    sim_data.resume_from_record("captures/newton_pcg", idx)
-    recorder.set_init_frame(idx)
-    act0.set_init_frame(idx)
-    act1.set_init_frame(idx)
+# def set_init_frame(idx: int):
+#     sim_data.resume_from_record("captures/newton_pcg", idx)
+#     recorder.set_init_frame(idx)
+#     act0.set_init_frame(idx)
+#     act1.set_init_frame(idx)
 
-set_init_frame(39)
+# set_init_frame(39)
 
 
 
