@@ -29,8 +29,10 @@ Thumbs.db
 # Logs
 *.log
 
-# Cursor / 临时
+.trae/
 .cursor/
 
 captures/
 debugger.py
+
+utils/plot

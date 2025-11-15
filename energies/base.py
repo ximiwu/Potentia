@@ -58,11 +58,22 @@ class IPotentialEnergy(abc.ABC):
         """
         pass
     @ti.func
+    def assemble_hessian_to_builder_func(self,
+                                         constraint: ti.template(),
+                                         q: ti.template(),
+                                         out_builder: ti.template()):
+        """
+        (@ti.func) 由能量端直接将本约束的 Hessian 贡献装配到 out_builder。
+        子类应覆盖本函数；默认不做任何操作。
+        """
+        pass
+    @ti.func
     def compute_hessian_block_ij_func(self,
                                       constraint: ti.template(),
                                       q: ti.template(),
                                       a: ti.i32,
-                                      b: ti.i32) -> ti.types.matrix(3, 3, ti.f32):
+                                      b: ti.i32,
+                                      out_builder: ti.template()) -> ti.types.matrix(3, 3, ti.f32):
         """
         (@ti.func) 通用接口：返回“局部顶点 a,b 的 3×3 赫塞块”。
         - a,b 为该约束的局部顶点索引（0..m-1），调用方保证 a,b 在活跃范围内。

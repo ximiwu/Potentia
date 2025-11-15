@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Callable
 import taichi as ti
 
 from data.base import ISimulationData
@@ -26,7 +26,8 @@ class NewtonSolver(ISolver):
         # 临时标量缓存
         self._tmp_scalar = ti.field(dtype=ti.f32, shape=())
 
-    def solve(self, data: ISimulationData, dt: float) -> None:
+    def solve(self, data: ISimulationData, dt: float,
+              iteration_callback: Optional[Callable[[int, ISimulationData, float], None]] = None) -> None:
         n = int(data.get_num_dofs())
         if n == 0:
             return
@@ -41,7 +42,7 @@ class NewtonSolver(ISolver):
         num_constraints = int(self._container.get_num_constraints())
 
         # 牛顿迭代
-        for _ in range(self.max_iterations):
+        for iter_idx in range(self.max_iterations):
             # 1) 梯度：G = M(x-y) + h^2 E'(x)
             self._container.compute_gradient(data, self._grad_e)
             self._compute_inertial_grad(data.get_predicted_dofs(), self._y, data.get_masses(), n, self._grad_total)

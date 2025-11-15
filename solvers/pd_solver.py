@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import taichi as ti
@@ -59,7 +59,8 @@ class PDSolver(ISolver):
         """
         self._container.compute_pd_rhs_init_vec(data, self._rhs_init, dt)
 
-    def solve(self, data: ISimulationData, dt: float) -> None:
+    def solve(self, data: ISimulationData, dt: float,
+              iteration_callback: Optional[Callable[[int, ISimulationData, float], None]] = None) -> None:
         if self._solver is None or self._n is None:
             raise RuntimeError("PDSolver: 尚未构建/分解 LHS。请先调用 rebuild_lhs(data, dt)。")
 
@@ -77,7 +78,12 @@ class PDSolver(ISolver):
         by = ti.ndarray(dtype=ti.f32, shape=(self._n,))
         bz = ti.ndarray(dtype=ti.f32, shape=(self._n,))
 
-        for _ in range(self.iterations):
+        for iter_idx in range(self.iterations):
+
+            # if iter_idx % 10000 == 0:
+            #     print(f"PD_iter{iter_idx}")
+            #     print(f"loss: {GlobalEnergyContainer.get_instance().compute_loss(data=data, x=data.get_predicted_dofs(), y=data.get_record_dofs(), dt=dt)}")
+
             # 构建/累加本次迭代的 RHS
             self._container.compute_pd_rhs_vec(data, self._rhs, self._rhs_init)
 
@@ -85,12 +91,19 @@ class PDSolver(ISolver):
             self._split_vec3_to_scalars(self._rhs, self._n, bx, by, bz)
 
             # 逐分量求解
-            solx = self._solver.solve(bx)  # type: ignore[union-attr]
-            soly = self._solver.solve(by)  # type: ignore[union-attr]
-            solz = self._solver.solve(bz)  # type: ignore[union-attr]
+            solx = self._solver.solve(bx)
+            soly = self._solver.solve(by)
+            solz = self._solver.solve(bz)
 
             # 写回到 q_predict，固定点（inv_mass == 0）跳过
             self._write_solution_to_qpredict(solx, soly, solz, data.get_predicted_dofs(), data.get_inv_masses(), self._n)
+
+            # 迭代回调（用于记录 loss 曲线等）
+            if iteration_callback is not None:
+                try:
+                    iteration_callback(iter_idx, data, dt)
+                except Exception as e:
+                    print(f"[PDSolver] 迭代回调失败: {e}")
 
 
     @ti.kernel
@@ -114,7 +127,7 @@ class PDSolver(ISolver):
                                     inv_masses: ti.template(),
                                     n: ti.i32):
         for i in range(n):
-            if inv_masses[i] != 0.0:
-                q_predict[i] = ti.Vector([x[i], y[i], z[i]])
+            # if inv_masses[i] >= 1e-6:
+            q_predict[i] = ti.Vector([x[i], y[i], z[i]])
 
 

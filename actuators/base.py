@@ -20,4 +20,9 @@ class IVertexActuator(abc.ABC):
         """对本次帧进行应用（写入 predicted_dofs）。"""
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def set_init_frame(self, init_frame: int) -> None:
+        """设置起始帧编号（默认 -1，首帧为 init_frame + 1）。"""
+        raise NotImplementedError
+
 

@@ -1,12 +1,10 @@
-from typing import TYPE_CHECKING, List
+from typing import List, Optional, Callable
 
 import taichi as ti
 
 from energies.global_energy_container import GlobalEnergyContainer
 from .base import ISolver
-
-if TYPE_CHECKING:
-    from data import ISimulationData
+from data.base import ISimulationData
 
 
 
@@ -37,8 +35,9 @@ class XPBDSolver(ISolver):
 
     def solve(
         self,
-        data: "ISimulationData",
+        data: ISimulationData,
         dt: float,
+        iteration_callback: Optional[Callable[[int, ISimulationData, float], None]] = None,
     ) -> None:
         """
         Performs the XPBD solve.
@@ -47,17 +46,22 @@ class XPBDSolver(ISolver):
             data (ISimulationData): The simulation data container.
             dt (float): The time step duration.
         """
-
-
         num_constraints = self.energy_container.get_num_constraints()
         if num_constraints > 0:
-            self._substep(
-                self.iterations,
-                num_constraints,
-                data.get_predicted_dofs(),
-                data.get_inv_masses(),
-                dt,
+            for iter_idx in range(self.iterations):
+                # 每次仅运行一次 kernel 子步，然后触发 Python 回调
+                self._substep(
+                    1,
+                    num_constraints,
+                    data.get_predicted_dofs(),
+                    data.get_inv_masses(),
+                    dt,
                 )
+                if iteration_callback is not None:
+                    try:
+                        iteration_callback(iter_idx, data, dt)
+                    except Exception as e:
+                        print(f"[XPBDSolver] 迭代回调失败: {e}")
 
     @ti.kernel
     def _substep(self, 

@@ -41,6 +41,7 @@ class SimulationWorld(ISimulationWorld):
         self.objects: List[ISimulationObject] = []
         self.forces: List[IForce] = []
         self.actuators: List[IVertexActuator] = []
+        self.step_count = 0
         
 
         self.energy_container = GlobalEnergyContainer.get_instance()
@@ -63,7 +64,11 @@ class SimulationWorld(ISimulationWorld):
     def get_recorder(self) -> Optional[IRecorder]:
         return self.recorder
 
+
+    
     def step(self, dt: float):
+
+
 
         if self.input_handler is not None:
             self.input_handler.handle_inputs(self, self.renderer, dt)
@@ -77,6 +82,13 @@ class SimulationWorld(ISimulationWorld):
             self.renderer.present()
             return
 
+        # print("step_count: ", self.step_count)
+        # print(self.data.get_dofs())
+        # print("--------------------------------")
+        # self.step_count += 1
+        # if self.step_count == 600:
+        #     exit()
+
         self.energy_container.clear_dynamic_constraints()
 
         # Collision detection will be added here in the future.
@@ -87,7 +99,15 @@ class SimulationWorld(ISimulationWorld):
         for actuator in self.actuators:
             actuator.apply(self.data, dt)
 
+
         self.data.record_predicted_dofs()
+
+        # self.data.set_predict_dof("captures/newton_pcg/dofs/dofs_000040.npy")
+        # self.data.set_predict_dof("captures/scipy_newton_cg/dofs/dofs_000040.npy")
+
+        
+
+
 
         # 可选能力：在 predict+actuator 后、求解前保存 predicted_dofs 及其 loss
         if self.recorder is not None and hasattr(self.recorder, "on_predict_end"):
@@ -96,7 +116,9 @@ class SimulationWorld(ISimulationWorld):
             except Exception as e:
                 print(f"[World] 调用 recorder.on_predict_end 失败: {e}")
 
-        self.solver.solve(self.data, dt)
+        self.solver.solve(self.data, dt, self.recorder.get_iteration_callback())
+        # for actuator in self.actuators:
+        #     actuator.apply(self.data, dt)
 
         self.integrator.update_state(self.data, dt)
         # self.integrator.clear_state(self.data)
@@ -116,6 +138,8 @@ class SimulationWorld(ISimulationWorld):
             self.input_handler.draw_ui(self, self.renderer)
 
         self.renderer.render(self.data, self.objects)
+        self.renderer.present()
+        
         if self.recorder is not None:
             self.recorder.on_frame_end(self.renderer, False)
-        self.renderer.present()
+        # exit()

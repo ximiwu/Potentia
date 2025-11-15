@@ -1,5 +1,5 @@
 import abc
-from typing import List
+from typing import List, Optional, Callable
 
 import taichi as ti
 
@@ -13,7 +13,8 @@ class ISolver(abc.ABC):
     """Implements an optimization strategy to minimize total energy."""
 
     @abc.abstractmethod
-    def solve(self, data: ISimulationData, dt: float) -> None:
+    def solve(self, data: ISimulationData, dt: float,
+              iteration_callback: Optional[Callable[[int, ISimulationData, float], None]] = None) -> None:
         """
         Gets predicted positions s_n from data.get_predicted_dofs(), applies an 
         optimization algorithm based on the constraints in the energy_container, 

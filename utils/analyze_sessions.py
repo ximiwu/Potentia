@@ -40,31 +40,43 @@ def _require_arrays_for_session(session_dir: str, frame_idx: int) -> Tuple[np.nd
     return dofs, pred
 
 
-def analyze_sessions(assessed_dir: str, gt_dir: str, start: int, end: int, out_csv: str, eps: float = 1e-12) -> None:
+def analyze_sessions(assessed_dir: str, gt_dir: str, start: int, end: int, out_csv: str, error_mode: str = "baseline", eps: float = 1e-12) -> None:
     """
     Compute per-frame error using two session directories:
     - assessed_dir provides g(x0) from predicted_dofs/loss_*.npy and g(xi) from dofs/loss_*.npy
     - gt_dir provides g(x*) from dofs/loss_*.npy
     Strict mode: any missing file triggers an immediate error.
+
+    error_mode:
+      - "baseline": error = (assessed_optimized - gt_optimized) / max(|assessed_init - gt_optimized|, eps)
+      - "relative": error = (assessed_optimized - gt_optimized) / max(|gt_optimized|, eps)
     """
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
     with open(out_csv, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "frame", "g_x0", "g_x_gt", "g_x_i", "error",
-            "assessed_dofs", "assessed_predicted_dofs",
-            "gt_dofs", "gt_predicted_dofs",
+            "frame",
+            "assessed_init_loss", "gt_init_loss",
+            "assessed_optimized_loss", "gt_optimized_loss",
+            "error",
+            # "assessed_dofs", "assessed_predicted_dofs",
+            # "gt_dofs", "gt_predicted_dofs",
         ])
 
         for i in range(start, end + 1):
-            g_x0 = _require_scalar_loss(assessed_dir, "predicted_dofs", i)
-            g_xi = _require_scalar_loss(assessed_dir, "dofs", i)
-            g_xstar = _require_scalar_loss(gt_dir, "dofs", i)
+            assessed_init_loss = _require_scalar_loss(assessed_dir, "predicted_dofs", i)
+            assessed_optimized_loss = _require_scalar_loss(assessed_dir, "dofs", i)
+            gt_optimized_loss = _require_scalar_loss(gt_dir, "dofs", i)
+            gt_init_loss = _require_scalar_loss(gt_dir, "predicted_dofs", i)
 
-            denom = g_x0 - g_xstar
-            if abs(denom) < eps:
-                raise ValueError(f"Denominator near zero at frame {i}: g_x0 - g_x_star = {denom}")
-            error = (g_xi - g_xstar) / denom
+            if error_mode == "baseline":
+                denom = assessed_init_loss - gt_optimized_loss
+                denom = max(abs(denom), eps)
+            elif error_mode == "relative":
+                denom = max(abs(gt_optimized_loss), eps)
+            else:
+                raise ValueError(f"Unknown error_mode: {error_mode}")
+            error = (assessed_optimized_loss - gt_optimized_loss) / denom
 
             a_dofs, a_pred = _require_arrays_for_session(assessed_dir, i)
             g_dofs, g_pred = _require_arrays_for_session(gt_dir, i)
@@ -75,9 +87,12 @@ def analyze_sessions(assessed_dir: str, gt_dir: str, start: int, end: int, out_c
             g_pred_json = json.dumps(g_pred.tolist(), separators=(",", ":"))
 
             writer.writerow([
-                i, g_x0, g_xstar, g_xi, error,
-                a_dofs_json, a_pred_json,
-                g_dofs_json, g_pred_json,
+                i,
+                assessed_init_loss, gt_init_loss,
+                assessed_optimized_loss, gt_optimized_loss,
+                error,
+                # a_dofs_json, a_pred_json,
+                # g_dofs_json, g_pred_json,
             ])
 
 
@@ -88,6 +103,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, required=True, help="Start frame index (inclusive)")
     parser.add_argument("--end", type=int, required=True, help="End frame index (inclusive)")
     parser.add_argument("--out", required=True, help="Output CSV file path")
+    parser.add_argument("--error-mode", choices=["baseline", "relative"], default="baseline",
+                        help="Error definition: baseline=(assessed_optimized-gt_optimized)/|assessed_init-gt_optimized|, "
+                             "relative=(assessed_optimized-gt_optimized)/|gt_optimized|")
     return parser.parse_args()
 
 
@@ -108,6 +126,7 @@ def _run_gui() -> None:
     gt_var = tk.StringVar()
     start_var = tk.StringVar(value="0")
     end_var = tk.StringVar(value="0")
+    mode_var = tk.StringVar(value="baseline")
 
     def browse_dir(target_var: tk.StringVar) -> None:
         init_dir = _get_captures_dir()
@@ -135,7 +154,7 @@ def _run_gui() -> None:
             return
         out_csv = os.path.join(assessed, "analysis.csv")
         try:
-            analyze_sessions(assessed, gt, start, end, out_csv)
+            analyze_sessions(assessed, gt, start, end, out_csv, error_mode=mode_var.get())
             messagebox.showinfo("Done", f"CSV saved to:\n{out_csv}")
         except Exception as e:
             messagebox.showerror("Failed", str(e))
@@ -167,8 +186,14 @@ def _run_gui() -> None:
     end_entry = ttk.Entry(frm, textvariable=end_var, width=12)
     end_entry.grid(row=3, column=1, sticky="w", padx=padx, pady=pady)
 
+    # Error mode
+    ttk.Label(frm, text="Error mode:").grid(row=4, column=0, sticky="w", padx=padx, pady=pady)
+    mode_combo = ttk.Combobox(frm, textvariable=mode_var, values=("baseline", "relative"), state="readonly", width=16)
+    mode_combo.grid(row=4, column=1, sticky="w", padx=padx, pady=pady)
+    mode_combo.current(0)
+
     # Start button
-    ttk.Button(frm, text="Start", command=on_start).grid(row=4, column=0, columnspan=3, pady=12)
+    ttk.Button(frm, text="Start", command=on_start).grid(row=5, column=0, columnspan=3, pady=12)
 
     for c in range(3):
         frm.columnconfigure(c, weight=1 if c == 1 else 0)
@@ -186,7 +211,7 @@ def _maybe_run_cli() -> bool:
     # If arguments provided, use CLI; else open GUI
     if len(sys.argv) > 1:
         args = _parse_args()
-        analyze_sessions(args.assessed, args.gt, args.start, args.end, args.out)
+        analyze_sessions(args.assessed, args.gt, args.start, args.end, args.out, error_mode=args.error_mode)
         return True
     return False
 

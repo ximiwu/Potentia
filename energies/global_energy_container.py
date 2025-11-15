@@ -173,7 +173,7 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
                                         out_acc: ti.template()):
         for i in range(n):
             m = masses[i]
-            if m > 0.0:
+            if m >= 1e-6:
                 d = x[i] - y[i]
                 ti.atomic_add(out_acc[None], 0.5 * m * d.dot(d))
 
@@ -187,23 +187,26 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
                                 out_builder: ti.types.sparse_matrix_builder()):
         for idx in range(self.num_active_constraints[None]):
             c = self.constraints[idx]
-            # 统计活跃顶点数 m（v_indices >= 0）
-            m = 0
-            for k in ti.static(range(self.v_indices_size)):
-                if c.v_indices[k] >= 0:
-                    m += 1
             for type_id in ti.static(list(self.registered_energies.keys())):
                 if c.constraint_type == type_id:
-                    for a in range(m):
-                        ia = c.v_indices[a]
-                        base_i = 3 * ia
-                        for b in range(m):
-                            ib = c.v_indices[b]
-                            base_j = 3 * ib
-                            H = self.registered_energies[type_id].compute_hessian_block_ij_func(c, q, a, b)
-                            for u in ti.static(range(3)):
-                                for v in ti.static(range(3)):
-                                    out_builder[base_i + u, base_j + v] += H[u, v]
+                    self.registered_energies[type_id].assemble_hessian_to_builder_func(c, q, out_builder)
+
+    def compute_hessian_abs_eig(self, data: ISimulationData, out_hessian_builder: Any):
+        """
+        装配 “绝对值特征值投影” 后的 Hessian。
+        """
+        q = data.get_predicted_dofs()
+        self._compute_hessian_abs_eig_kernel(q, out_hessian_builder)
+
+    @ti.kernel
+    def _compute_hessian_abs_eig_kernel(self,
+                                        q: ti.template(),
+                                        out_builder: ti.types.sparse_matrix_builder()):
+        for idx in range(self.num_active_constraints[None]):
+            c = self.constraints[idx]
+            for type_id in ti.static(list(self.registered_energies.keys())):
+                if c.constraint_type == type_id:
+                    self.registered_energies[type_id].assemble_hessian_abs_eig_to_builder_func(c, q, out_builder)
 
     def compute_pd_rhs_init_vec(self, data: ISimulationData, out_vec: ti.template(), dt: float):
         """
@@ -371,3 +374,76 @@ class GlobalEnergyContainer(IGlobalEnergyContainer):
             if constraint.constraint_type == type_id:
                 C, num_vertices = self.registered_energies[type_id].compute_constraint_gradient_func(constraint, q, grads)
         return C, grads, num_vertices
+
+    def compute_loss_gradient_fro_norm(self, data: ISimulationData, x: ti.template(), y: ti.template(), dt: float) -> ti.f32:
+        capacity = int(data.get_max_num_dofs())
+        if not hasattr(self, "_tmp_grad"):
+            self._tmp_grad = ti.Vector.field(3, dtype=ti.f32, shape=capacity)
+        elif int(self._tmp_grad.shape[0]) != capacity:
+            self._tmp_grad = ti.Vector.field(3, dtype=ti.f32, shape=capacity)
+        self._tmp_grad.fill(0)
+        self._compute_gradient_kernel(x, self._tmp_grad)
+        n = int(data.get_num_dofs())
+        return self._grad_loss_l2_norm_kernel(self._tmp_grad, data.get_masses(), x, y, n, float(dt))
+
+    def compute_loss_hessian_fro_norm(self, data: ISimulationData, dt: float) -> ti.f32:
+        n = int(data.get_num_dofs())
+        dim = 3 * n
+        num_constraints = int(self.num_active_constraints[None])
+        max_blocks_per_c = self.v_indices_size * self.v_indices_size
+        max_triplets = max(1, num_constraints * 9 * max_blocks_per_c)
+        he_builder = ti.linalg.SparseMatrixBuilder(dim, dim, max_num_triplets=max_triplets)
+        self.compute_hessian(data, he_builder)
+        He = he_builder.build()
+        mass_builder = ti.linalg.SparseMatrixBuilder(dim, dim, max_num_triplets=dim)
+        self._fill_mass_diag_for_hessian_kernel(data.get_masses(), n, mass_builder)
+        M = mass_builder.build()
+        H = M + (He * (float(dt) * float(dt)))
+
+        e = ti.ndarray(dtype=ti.f32, shape=(dim,))
+        y = ti.ndarray(dtype=ti.f32, shape=(dim,))
+        acc = 0.0
+        for i in range(dim):
+            self._set_one_hot_nd(e, i)
+            y = H @ e
+            acc += float(self._l2_norm_nd(y)) ** 2
+        return float(np.sqrt(acc))
+
+    @ti.kernel
+    def _grad_loss_l2_norm_kernel(self,
+                                  grad_e: ti.template(),
+                                  masses: ti.template(),
+                                  x: ti.template(),
+                                  y: ti.template(),
+                                  n: ti.i32,
+                                  dt: ti.f32) -> ti.f32:
+        acc = 0.0
+        for i in range(n):
+            g0 = masses[i] * (x[i] - y[i])
+            g = g0 + grad_e[i] * (dt * dt)
+            acc += g.dot(g)
+        return ti.sqrt(acc)
+
+    @ti.kernel
+    def _fill_mass_diag_for_hessian_kernel(self,
+                                           masses: ti.template(),
+                                           n: ti.i32,
+                                           builder: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            m = masses[i]
+            base = 3 * i
+            for c in ti.static(range(3)):
+                builder[base + c, base + c] += m
+
+    @ti.kernel
+    def _set_one_hot_nd(self, e: ti.types.ndarray(dtype=ti.f32, ndim=1), idx: ti.i32):
+        for i in range(e.shape[0]):
+            e[i] = 1.0 if i == idx else 0.0
+
+    @ti.kernel
+    def _l2_norm_nd(self, x: ti.types.ndarray(dtype=ti.f32, ndim=1)) -> ti.f32:
+        acc = 0.0
+        for i in range(x.shape[0]):
+            v = x[i]
+            acc += v * v
+        return ti.sqrt(acc)

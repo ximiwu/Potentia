@@ -1,4 +1,5 @@
 import imp
+import math
 from typing import List, Optional, Tuple
 
 import taichi as ti
@@ -10,6 +11,7 @@ from energies.distance_energy import DistanceEnergy
 from energies.pd_spring_energy import PDSpringEnergy
 from energies.pd_bending_energy import PDBendingEnergy
 from energies.pd_strain_energy import PDStrainEnergy
+from energies.attachment_energy import AttachmentEnergy
 
 from mesh.base import IEdgeDataProvider, IMesh
 from mesh.transforms import rotate_positions, scale_positions
@@ -54,6 +56,7 @@ class MeshObject(IMeshObject):
         self._pd_spring_energy = PDSpringEnergy.get_instance()
         self._pd_bending_energy = PDBendingEnergy.get_instance()
         self._pd_strain_energy = PDStrainEnergy.get_instance()
+        self._attachment_energy = AttachmentEnergy.get_instance()
         self._energy_container = GlobalEnergyContainer.get_instance()
 
         self._mesh = mesh
@@ -149,7 +152,12 @@ class MeshObject(IMeshObject):
         mass_val: ti.f32,
     ):
         inv_masses[idx] = inv_mass_val
-        masses[idx] = mass_val
+        if mass_val >= 0.0:
+            masses[idx] = mass_val
+        else:
+            # masses[idx] = masses[idx] * 10000
+            masses[idx] = masses[idx] * 10000
+
 
 
     @ti.kernel
@@ -235,9 +243,8 @@ class MeshObject(IMeshObject):
         global_idx = self._data_offset + local_index
 
         if mass == -1.0:
-            # Pinned vertex per spec: inv_mass = 0
             inv_mass_val = 0.0
-            mass_val = 10
+            mass_val = -1.0
         else:
             if mass <= 0.0:
                 raise ValueError("mass must be positive, or -1 for pinned vertex")
@@ -326,80 +333,282 @@ class MeshObject(IMeshObject):
                 stiffness
             )
 
-    def add_pd_spring_energy(self, stiffness: float):
+    @ti.kernel
+    def _add_attachment_constraint_kernel(
+        self,
+        dofs: ti.template(),
+        data_offset: ti.i32,
+        idx_local: ti.i32,
+        stiffness: ti.f32,
+        start_idx: ti.i32,
+        attach_energy: ti.template(),
+        energy_container: ti.template(),
+        attach_pos: ti.types.vector(3, ti.f32),
+        use_current: ti.i32,
+    ):
+        idx_global = data_offset + idx_local
+        pos = attach_pos
+        if use_current == 1:
+            pos = dofs[idx_global]
+        attach_energy.add_one_constraint_func(
+            energy_container,
+            start_idx,
+            idx_global,
+            pos,
+            stiffness,
+        )
+
+    def add_attachment_energy(self, stiffness: float, idx: int, attach_pos: ti.Vector([float, float, float]) = None):
         """
-        Factory method to create and add PD edge spring energy
-        to the global DistanceEnergy singleton.
-
-        This method requires the associated mesh to provide edge connectivity data.
-
-        Args:
-            stiffness (float): The stiffness parameter for this batch of constraints.
+        添加固定点约束，将 idx 点固定在 attach_pos 位置。
+        如果 attach_pos 为 None，则默认固定在当前位置。
         """
-        # --- Type and Capability Checking ---
-        if not hasattr(self._mesh, 'get_edge_indices'):
-            raise AttributeError("The mesh does not provide edge data (IEdgeDataProvider). Cannot create distance energy.")
+        V = int(self._mesh.get_num_vertices())
+        if idx < 0 or idx >= V:
+            raise IndexError(f"local_index {idx} out of range [0, {V - 1}]")
 
-        # --- Constraint Preparation ---
-        edge_indices = self._mesh.get_edge_indices()
-        assert edge_indices.shape[0] % 2 == 0
-        num_edges = edge_indices.shape[0] // 2
-        if num_edges == 0:
+        start_idx = self._energy_container.reserve_constraints(1)
+
+        use_current = 1 if attach_pos is None else 0
+        pos_vec = vec3(0.0, 0.0, 0.0) if attach_pos is None else vec3(*attach_pos)
+
+        self._add_attachment_constraint_kernel(
+            self._data.get_dofs(),
+            self._data_offset,
+            idx,
+            stiffness,
+            start_idx,
+            self._attachment_energy,
+            self._energy_container,
+            pos_vec,
+            use_current,
+        )
+        return start_idx
+
+    def add_pd_spring_energy(self, stiffness: float, single_diag: bool = True):
+        """
+        按点遍历构建 PD 弹簧（结构/剪切/弯曲），适用于 n×n 规则网格：
+        - 结构：(i,j)-(i,j+1), (i,j)-(i+1,j)，静长 r
+        - 剪切：(i,j)-(i+1,j+1), (i+1,j)-(i,j+1)，静长 sqrt(2)*r
+        - 弯曲（跨两格）：对每个点尝试 (i,j)-(i,j+2) 与 (i,j)-(i+2,j)，静长 2*r
+
+        计数：
+        - 结构：2 * n * (n - 1)
+        - 剪切：2 * (n - 1) * (n - 1)
+        - 弯曲：2 * n * (n - 2)
+        """
+        V = int(self._mesh.get_num_vertices())
+        if V == 0:
             return
 
-        start_idx = self._energy_container.reserve_constraints(num_edges)
+        # 推断 n（规则方格网），若不满足则提示
+        n_f = math.sqrt(float(V))
+        n = int(round(n_f))
+        if n * n != V or n < 2:
+            raise ValueError(
+                f"PD 网格弹簧仅支持 n×n 规则网格顶点，当前 V={V} 无法推断有效 n。")
 
-        self._add_pd_spring_constraints_kernel(
+        # 预留约束空间（按实际将要添加的数量，避免过/欠预留）
+        struct_cnt = 2 * n * (n - 1)
+        shear_cnt = (n - 1) * (n - 1) if single_diag else 2 * (n - 1) * (n - 1)
+        bend_cnt = max(2 * n * (n - 2), 0)
+        n_springs = struct_cnt + shear_cnt + bend_cnt
+        start_idx = self._energy_container.reserve_constraints(n_springs)
+
+        # 读取静止位置用于估计 r（邻接均匀间距），使用 (0,0)-(0,1) 与 (0,0)-(1,0) 的平均
+        rest_positions = self._mesh.get_rest_positions()
+
+        # 按点遍历添加三类弹簧（静长以 r 为基准）
+        self._add_pd_spring_constraints_on_grid_kernel(
             self._data.get_dofs(),
-            edge_indices,
+            rest_positions,
             self._data_offset,
             stiffness,
             start_idx,
             self._pd_spring_energy,
             self._energy_container,
-            num_edges,
-
+            n,
+            1 if single_diag else 0,
         )
 
 
     @ti.kernel
-    def _add_pd_spring_constraints_kernel(
+    def _add_pd_spring_constraints_on_grid_kernel(
         self,
         dofs: ti.template(),
-        mesh_edge_indices: ti.template(),
+        rest_positions: ti.template(),
         data_offset: ti.i32,
         stiffness: ti.f32,
         start_idx: ti.i32,
-        distance_energy: ti.template(),
+        pd_spring_energy: ti.template(),
         energy_container: ti.template(),
-        num_edges: ti.i32
+        n: ti.i32,
+        single_diag: ti.i32,
     ):
         """
-        Taichi kernel to compute rest lengths from the current deformed shape and
-        add distance constraints directly to the global energy container.
+        在 n×n 网格上按点遍历创建 PD 弹簧，索引布局：
+        - 结构（水平 -> 垂直）： 2 * n * (n - 1)
+          * 水平偏移 base_struct_h = 0，编号 i*(n-1)+j
+          * 垂直偏移 base_struct_v = n*(n-1)，编号 j*(n-1)+i
+        - 剪切（每格一条对角）： (n - 1)**2
+          * base_shear = 2*n*(n-1)
+          * diag1: cell_id = i*(n-1)+j
+        - 弯曲（跨点连接）： 2 * n * (n - 2)
+          * base_bend = base_shear + (n-1)**2
+          * 水平：base_bend_h = base_bend，偏移 i*(n-2)+j
+          * 垂直：base_bend_v = base_bend + n*(n-2)，偏移 j*(n-2)+i
         """
-        for i in range(num_edges):
-            idx1_local = mesh_edge_indices[2 * i + 0]
-            idx2_local = mesh_edge_indices[2 * i + 1]
+        base_struct_h = 0
+        base_struct_v = n * (n - 1)
+        base_shear = 2 * n * (n - 1)
+        shear_cnt = (n - 1) * (n - 1) if single_diag == 1 else 2 * (n - 1) * (n - 1)
+        base_bend = base_shear + shear_cnt
+        base_bend_h = base_bend
+        base_bend_v = base_bend + n * (n - 2)
 
-            p1_idx_global = idx1_local + data_offset
-            p2_idx_global = idx2_local + data_offset
+        # 估计基础静长 r（均匀网格），水平与垂直的平均
+        r_h = (rest_positions[0] - rest_positions[1]).norm() if n > 1 else 0.0
+        r_v = (rest_positions[0] - rest_positions[n]).norm() if n > 1 else 0.0
+        r = 0.5 * (r_h + r_v)
+        r_shear = ti.sqrt(2.0) * r
+        r_bend = 2.0 * r
 
-            v_indices = ti.Vector([p1_idx_global, p2_idx_global])
+        for i in range(n):
+            for j in range(n):
+                p_ij = data_offset + i * n + j
 
-            # Calculate rest distance from the CURRENT positions in the global dofs array
-            p1_current = dofs[p1_idx_global]
-            p2_current = dofs[p2_idx_global]
-            rest_dist = (p1_current - p2_current).norm()
-            
-            constraint_idx = start_idx + i
-            distance_energy.add_one_constraint_func(
-                energy_container,
-                constraint_idx,
-                v_indices,
-                rest_dist,
-                stiffness
-            )
+                # 结构：水平 (i,j)-(i,j+1)
+                if j < n - 1:
+                    p_right = data_offset + i * n + (j + 1)
+                    idx_h = start_idx + base_struct_h + i * (n - 1) + j
+                    v_idx = ti.Vector([p_ij, p_right])
+                    rest_h = r
+                    pd_spring_energy.add_one_constraint_func(
+                        energy_container,
+                        idx_h,
+                        v_idx,
+                        rest_h,
+                        stiffness,
+                    )
+
+                # 结构：垂直 (i,j)-(i+1,j)
+                if i < n - 1:
+                    p_down = data_offset + (i + 1) * n + j
+                    idx_v = start_idx + base_struct_v + j * (n - 1) + i
+                    v_idx = ti.Vector([p_ij, p_down])
+                    rest_v = r
+                    pd_spring_energy.add_one_constraint_func(
+                        energy_container,
+                        idx_v,
+                        v_idx,
+                        rest_v,
+                        stiffness,
+                    )
+
+                # 剪切：根据 single_diag 模式生成对角弹簧
+                if single_diag == 0:
+                    if i < n - 1 and j < n - 1:
+                        cell_id = i * (n - 1) + j
+                        p_dr = data_offset + (i + 1) * n + (j + 1)
+                        idx_d1 = start_idx + base_shear + cell_id
+                        v_idx = ti.Vector([p_ij, p_dr])
+                        pd_spring_energy.add_one_constraint_func(
+                            energy_container,
+                            idx_d1,
+                            v_idx,
+                            r_shear,
+                            stiffness * 0.5,
+                        )
+
+                        p_dl = data_offset + (i + 1) * n + j
+                        p_ur = data_offset + i * n + (j + 1)
+                        idx_d2 = start_idx + base_shear + (n - 1) * (n - 1) + cell_id
+                        v_idx2 = ti.Vector([p_dl, p_ur])
+                        pd_spring_energy.add_one_constraint_func(
+                            energy_container,
+                            idx_d2,
+                            v_idx2,
+                            r_shear,
+                            stiffness * 0.5,
+                        )
+                else:
+                    if (i % 2 == 1) and (j % 2 == 0):
+                        if i < n - 1 and j < n - 1:
+                            p_dr = data_offset + (i + 1) * n + (j + 1)
+                            cell_id = i * (n - 1) + j
+                            idx = start_idx + base_shear + cell_id
+                            v_idx = ti.Vector([p_ij, p_dr])
+                            pd_spring_energy.add_one_constraint_func(
+                                energy_container,
+                                idx,
+                                v_idx,
+                                r_shear,
+                                stiffness,
+                            )
+                        if i > 0 and j < n - 1:
+                            p_ur = data_offset + (i - 1) * n + (j + 1)
+                            cell_id = (i - 1) * (n - 1) + j
+                            idx = start_idx + base_shear + cell_id
+                            v_idx = ti.Vector([p_ij, p_ur])
+                            pd_spring_energy.add_one_constraint_func(
+                                energy_container,
+                                idx,
+                                v_idx,
+                                r_shear,
+                                stiffness,
+                            )
+                        if i < n - 1 and j > 0:
+                            p_dl = data_offset + (i + 1) * n + (j - 1)
+                            cell_id = i * (n - 1) + (j - 1)
+                            idx = start_idx + base_shear + cell_id
+                            v_idx = ti.Vector([p_ij, p_dl])
+                            pd_spring_energy.add_one_constraint_func(
+                                energy_container,
+                                idx,
+                                v_idx,
+                                r_shear,
+                                stiffness,
+                            )
+                        if i > 0 and j > 0:
+                            p_ul = data_offset + (i - 1) * n + (j - 1)
+                            cell_id = (i - 1) * (n - 1) + (j - 1)
+                            idx = start_idx + base_shear + cell_id
+                            v_idx = ti.Vector([p_ij, p_ul])
+                            pd_spring_energy.add_one_constraint_func(
+                                energy_container,
+                                idx,
+                                v_idx,
+                                r_shear,
+                                stiffness,
+                            )
+
+                # 弯曲：水平 (i,j)-(i,j+2)
+                if (j + 2) < n:
+                    p_j2 = data_offset + i * n + (j + 2)
+                    idx_bh = start_idx + base_bend_h + i * (n - 2) + j
+                    v_idx = ti.Vector([p_ij, p_j2])
+                    rest_bh = r_bend
+                    pd_spring_energy.add_one_constraint_func(
+                        energy_container,
+                        idx_bh,
+                        v_idx,
+                        rest_bh,
+                        stiffness * 0.25,
+                    )
+
+                # 弯曲：垂直 (i,j)-(i+2,j)
+                if (i + 2) < n:
+                    p_i2 = data_offset + (i + 2) * n + j
+                    idx_bv = start_idx + base_bend_v + j * (n - 2) + i
+                    v_idx = ti.Vector([p_ij, p_i2])
+                    rest_bv = r_bend
+                    pd_spring_energy.add_one_constraint_func(
+                        energy_container,
+                        idx_bv,
+                        v_idx,
+                        rest_bv,
+                        stiffness * 0.25,
+                    )
 
     def add_pd_strain_energy(self, stiffness: float, singular_min: float, singular_max: float) -> None:
         """

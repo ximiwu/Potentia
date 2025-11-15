@@ -15,6 +15,7 @@ class PDSpringEnergy(PotentialEnergy):
     """
     TYPE_ID = 3
 
+
     def __init__(self):
         super().__init__()
         # Cache the global container instance for use inside Taichi funcs via ti.static
@@ -28,7 +29,6 @@ class PDSpringEnergy(PotentialEnergy):
                                 distance: ti.f32,
                                 stiffness: ti.f32,
                                 ):
-
 
 
         params = ti.Vector([stiffness, distance])
@@ -134,11 +134,29 @@ class PDSpringEnergy(PotentialEnergy):
             
 
     @ti.func
+    def assemble_hessian_to_builder_func(self,
+                                         constraint: ti.template(),
+                                         q: ti.template(),
+                                         out_builder: ti.template()):
+        # 二元：局部 0->i, 1->j
+        for a in ti.static(range(2)):
+            ia = constraint.v_indices[a]
+            base_i = 3 * ia
+            for b in ti.static(range(2)):
+                ib = constraint.v_indices[b]
+                base_j = 3 * ib
+                H = self.compute_hessian_block_ij_func(constraint, q, a, b, out_builder)
+                for u in ti.static(range(3)):
+                    for v in ti.static(range(3)):
+                        out_builder[base_i + u, base_j + v] += H[u, v]
+
+    @ti.func
     def compute_hessian_block_ij_func(self,
                                       constraint: ti.template(),
                                       q: ti.template(),
                                       a: ti.i32,
-                                      b: ti.i32) -> ti.types.matrix(3, 3, ti.f32):
+                                      b: ti.i32,
+                                      out_builder: ti.template()) -> ti.types.matrix(3, 3, ti.f32):
         # 二元弹簧：local 0 -> p1, local 1 -> p2
         H = ti.Matrix.zero(ti.f32, 3, 3)
         if a < 2 and b < 2:
@@ -166,4 +184,35 @@ class PDSpringEnergy(PotentialEnergy):
                 for v in ti.static(range(3)):
                     H[u, v] = sgn * Hblk[u, v]
         return H
+
+    @ti.func
+    def assemble_hessian_abs_eig_to_builder_func(self,
+                                                 constraint: ti.template(),
+                                                 q: ti.template(),
+                                                 out_builder: ti.template()):
+        """
+        将局部 3×3 Hessian 块做“绝对值特征值投影”后再装配：
+        - 先对称化 Hs = 0.5 (H + H^T)
+        - 使用 SVD 近似对称 EVD：Hs ≈ U S U^T（对称矩阵时 U≈V）
+        - 取对角为非负并重构 H_proj = U |S| U^T
+        """
+        for a in ti.static(range(2)):
+            ia = constraint.v_indices[a]
+            base_i = 3 * ia
+            for b in ti.static(range(2)):
+                ib = constraint.v_indices[b]
+                base_j = 3 * ib
+                H = self.compute_hessian_block_ij_func(constraint, q, a, b, out_builder)
+                # 对称化
+                Hs = 0.5 * (H + H.transpose())
+                # SVD 作为 EVD 的鲁棒近似（对称阵下 U ≈ V）
+                U, S, V = ti.svd(Hs)
+                # 取绝对值“特征值”
+                S_abs = ti.Matrix.zero(ti.f32, 3, 3)
+                for k in ti.static(range(3)):
+                    S_abs[k, k] = ti.abs(S[k, k])
+                H_proj = U @ S_abs @ U.transpose()
+                for u in ti.static(range(3)):
+                    for v in ti.static(range(3)):
+                        out_builder[base_i + u, base_j + v] += H_proj[u, v]
 

@@ -90,6 +90,14 @@ class PingPongMoveActuator(IVertexActuator):
         self._t_in_state = 0.0
 
     def apply(self, data: ISimulationData, dt: float) -> None:
+        # 一次性快进：将内部状态先推进 (_init_frame + 1) 个 dt（不写 predicted_dofs）
+        steps_to_skip = int(getattr(self, "_init_frame", -1))
+        if not getattr(self, "_init_skip_done", False):
+            if steps_to_skip > 0:
+                for _ in range(steps_to_skip):
+                    self._advance_state_only(float(dt))
+            self._init_skip_done = True
+
         # 推进状态机
         t = self._t_in_state + float(dt)
         state = self._state
@@ -123,6 +131,42 @@ class PingPongMoveActuator(IVertexActuator):
                 state = 0
                 t = t - self._wait_duration
             self._write_targets_kernel(self._global_indices, self._pos1, self._pos2, data.get_predicted_dofs(), float(alpha), 0)
+
+        self._state = state
+        self._t_in_state = t
+
+    # 帧编号设置（接口统一）：当前不影响运动，仅存储，供将来按帧驱动时使用
+    def set_init_frame(self, init_frame: int) -> None:
+        self._init_frame = int(init_frame)
+        # 标记未执行过快进，等待首次 apply 时进行
+        self._init_skip_done = False
+
+    def _advance_state_only(self, dt: float) -> None:
+        """仅推进内部状态机，不写 predicted_dofs。"""
+        t = self._t_in_state + float(dt)
+        state = self._state
+
+        if state == 0:  # move pos1 -> pos2
+            alpha = t / self._move_duration
+            if alpha >= 1.0:
+                state = 1
+                t = t - self._move_duration
+
+        elif state == 1:  # wait at pos2
+            if t >= self._wait_duration:
+                state = 2
+                t = t - self._wait_duration
+
+        elif state == 2:  # move pos2 -> pos1
+            alpha = t / self._move_duration
+            if alpha >= 1.0:
+                state = 3
+                t = t - self._move_duration
+
+        else:  # state == 3, wait at pos1
+            if t >= self._wait_duration:
+                state = 0
+                t = t - self._wait_duration
 
         self._state = state
         self._t_in_state = t
